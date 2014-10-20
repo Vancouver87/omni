@@ -113,10 +113,10 @@ PRODUCT_COPY_FILES += \
 
 # Build.prop 
 PRODUCT_PROPERTY_OVERRIDES += \
-    persist.sys.timezone=Europe/Berlin \
-    persist.sys.language=de \
-    persist.sys.country=DE \
-    ro.sf.lcd_density=264 \
+    persist.sys.timezone=Europe/Moscow \
+    persist.sys.language=ru \
+    persist.sys.country=RU \
+    ro.sf.lcd_density=240 \
     ro.sf.lcdc_composer=1 \
     ro.sf.fakerotation=false \
     ro.sf.hwrotation=0 \
@@ -130,8 +130,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
     hwui.render_dirty_regions=false \
     qemu.hw.mainkeys=0 \
     wifi.interface=wlan0 \
-    wifi.supplicant_scan_interval=15 \
-    persist.sys.usb.config=mass_storage
+    wifi.supplicant_scan_interval=180 
 
 # Camera
 PRODUCT_PACKAGES += \
