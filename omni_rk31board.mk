@@ -12,5 +12,5 @@ PRODUCT_RELEASE_NAME := rk31board
 PRODUCT_NAME := omni_rk31board
 PRODUCT_DEVICE := rk31board
 PRODUCT_BRAND := Android
-PRODUCT_MODEL := OmniROM on rk31board
+PRODUCT_MODEL := m9pro
 PRODUCT_MANUFACTURER := Rockchip
