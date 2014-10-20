@@ -1,0 +1,60 @@
+From 1b2b2055d29bb68dca3c457e6ed9cc25724f4cb7 Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Fri, 11 Jul 2014 20:22:24 +0200
+Subject: [PATCH] add libbt-vendor-rtl.so
+
+Change-Id: I4b0ac5b1e94cb0c9f49d36cf2191c890202d7b51
+---
+ hci/src/bt_hw.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/hci/src/bt_hw.c b/hci/src/bt_hw.c
+index 5265dce..670d988 100644
+--- a/hci/src/bt_hw.c
++++ b/hci/src/bt_hw.c
+@@ -195,6 +195,25 @@ static const bt_vendor_callbacks_t vnd_callbacks = {
+     epilog_cb
+ };
+ 
++#include <fcntl.h>
++#define WIFI_CHIP_TYPE_PATH         "/sys/class/rkwifi/chip"
++static int rtk_chip_type(void)
++{
++    static int rtk = -1;
++    if(rtk == -1) {
++        int fd = open(WIFI_CHIP_TYPE_PATH, O_RDONLY);
++        rtk = 0;
++        if(fd >= 0){
++            char name[10] = {0};
++            read(fd, name, sizeof(name));
++            ALOGE("rtk_chip_type %s", name);
++            rtk = !memcmp("RTL8723AU", name, 9);
++            close(fd);
++        }
++    }
++    return rtk;
++}
++
+ /******************************************************************************
+ **
+ ** Function         init_vnd_if
+@@ -207,11 +226,14 @@ static const bt_vendor_callbacks_t vnd_callbacks = {
+ void init_vnd_if(unsigned char *local_bdaddr)
+ {
+     void *dlhandle;
++    const char * vendor;
++    if(rtk_chip_type()) vendor = "libbt-vendor-rtl.so";
++    else vendor = "libbt-vendor.so";
+ 
+-    dlhandle = dlopen("libbt-vendor.so", RTLD_NOW);
++    dlhandle = dlopen(vendor, RTLD_NOW);
+     if (!dlhandle)
+     {
+-        ALOGE("!!! Failed to load libbt-vendor.so !!!");
++        ALOGE("!!! Failed to load %s !!!", vendor);
+         return;
+     }
+ 
+-- 
+1.9.1
+

@@ -1,0 +1,70 @@
+From 344bcf121b1229a18656b095aaa4d26ceeec8331 Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Thu, 10 Jul 2014 22:25:52 +0200
+Subject: [PATCH] add HDMI Settings
+
+Change-Id: Ib7b045198978a4fa87a31a0098c8cd6ca18c4297
+---
+ res/drawable/ic_settings_hdmi.png | Bin 0 -> 484 bytes
+ res/values/strings.xml            |   3 +++
+ res/xml/settings_headers.xml      |  10 ++++++++++
+ 3 files changed, 13 insertions(+)
+ create mode 100644 res/drawable/ic_settings_hdmi.png
+
+diff --git a/res/drawable/ic_settings_hdmi.png b/res/drawable/ic_settings_hdmi.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..97e0af36b8c426e1d7dd96fa411684528acb1e18
+GIT binary patch
+literal 484
+zcmV<A0UQ2_P)<h;3K|Lk000e1NJLTq001BW001Be1ONa4*>kdg00009a7bBm000XU
+z000XU0RWnu7ytkOAY({UO#lFTB>(_`g8%^e{{R4h=>PzAFaQARU;qF*m;eA5Z<1fd
+zMgRZ-YDq*vRCwCNRm*O}FbpGI4+Zv9J8VGzso%EK_D=(PXt_iDkYqb6ki(1uNh4dL
+zNJ*w}Y^8(ekpY0_gT??4`yuXKAvl2m2tnoT^kfR$V%$Mw2p3!+WDxge^ZQj`eQAS4
+zmj(-fnBp6U6#QWp+>sZ7AZWfM8>>cRz+l~|g)%DGC^WI;aCECoV#ym-BA^{rNKirO
+zT+QE&vd?AFd=w{^=wzfD7>`R%Y<345EX^u$vIs#hHI-BoR*+|Yv^`V(n@Tm2whosm
+zG^96>GAV37EfCN>OJK>8*on~&c?u<FWu#U6iS<ArQTmeshv7Al$k2s*5&{B#2uGq?
+zeecuQm8yhi-}M6VJ}FqQfef1Do0g^~ZOO8<dpB^L2UUd_U&hj=fhIFi2FEyL`lOO;
+zx`Z(Qq6@lioeck2zJj2nEa)ugs%v@6O0&Jx{9>sW${E1TUNCX*%0c9Ic{B0fFW18k
+aeg^<JIicSlMhwsZ0000<MNUMnLSTZ6e8Qyw
+
+literal 0
+HcmV?d00001
+
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 2fe562b..c980836 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -4913,6 +4913,9 @@
+     <!-- Text to display in regulatory info screen (from device overlay). -->
+     <string name="regulatory_info_text"></string>
+ 
++    <!-- HDMI -->
++	<string name="hdmi_settings">Hdmi</string>
++
+     <!-- SuperSU header name - the app hides itself from launcher based on this resource name being present in com.android.settings -->
+     <string name="supersu_title">SuperSU</string>
+ </resources>
+diff --git a/res/xml/settings_headers.xml b/res/xml/settings_headers.xml
+index d69dc5e..59b0cd1 100644
+--- a/res/xml/settings_headers.xml
++++ b/res/xml/settings_headers.xml
+@@ -122,6 +122,16 @@
+         android:fragment="com.android.settings.DisplaySettings"
+         android:title="@string/display_settings" />
+ 
++    <!-- HDMI -->
++    <header 
++        android:icon="@drawable/ic_settings_hdmi" 
++        android:title="@string/hdmi_settings">
++        <intent 
++            android:action="android.intent.action.MAIN" 
++            android:targetClass="com.jucaroba.hdmirk.HdmiRK"
++            android:targetPackage="com.jucaroba.hdmirk" />
++    </header>
++
+     <!-- buttons -->
+     <header
+         android:id="@+id/button_settings"
+-- 
+1.9.1
+

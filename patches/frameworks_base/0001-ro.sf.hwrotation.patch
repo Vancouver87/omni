@@ -1,0 +1,194 @@
+From 5e0bff5998b14589cbc42bd94da4a3558da420eb Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Mon, 7 Jul 2014 21:34:44 +0200
+Subject: [PATCH] changes for ro.sf.hwrotation
+
+Change-Id: Ie735e02bdfd58602a85124c7ad25991994bc8e21
+---
+ services/input/InputReader.h                       | 15 +++++++++++
+ .../android/server/wm/WindowManagerService.java    | 21 +++++++++++++++
+ ...om_android_server_input_InputManagerService.cpp | 31 ++++++++++++++++++----
+ 3 files changed, 62 insertions(+), 5 deletions(-)
+
+diff --git a/services/input/InputReader.h b/services/input/InputReader.h
+index f5eb3a8..ec8a181 100644
+--- a/services/input/InputReader.h
++++ b/services/input/InputReader.h
+@@ -109,6 +109,21 @@ struct DisplayViewport {
+         deviceWidth = width;
+         deviceHeight = height;
+     }
++
++    void copyFrom(const DisplayViewport& other) {
++        displayId = other.displayId;
++        orientation = other.orientation;
++        logicalLeft = other.logicalLeft;
++        logicalTop = other.logicalTop;
++        logicalRight = other.logicalRight;
++        logicalBottom = other.logicalBottom;
++        physicalLeft = other.physicalLeft;
++        physicalTop = other.physicalTop;
++        physicalRight = other.physicalRight;
++        physicalBottom = other.physicalBottom;
++        deviceWidth = other.deviceWidth;
++        deviceHeight = other.deviceHeight;
++    }
+ };
+ 
+ /*
+diff --git a/services/java/com/android/server/wm/WindowManagerService.java b/services/java/com/android/server/wm/WindowManagerService.java
+index c821110..ab758c23 100644
+--- a/services/java/com/android/server/wm/WindowManagerService.java
++++ b/services/java/com/android/server/wm/WindowManagerService.java
+@@ -88,6 +88,7 @@ import android.os.SystemClock;
+ import android.os.SystemProperties;
+ import android.os.Trace;
+ import android.os.WorkSource;
++import android.os.Build;
+ import android.provider.Settings;
+ import android.util.DisplayMetrics;
+ import android.util.EventLog;
+@@ -285,6 +286,8 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+     private static final String SYSTEM_SECURE = "ro.secure";
+     private static final String SYSTEM_DEBUGGABLE = "ro.debuggable";
++    private static final String WINDOW_FAKE_ROTATION = "ro.sf.fakerotation";
++    private static final String WINDOW_ROTATION_DEGREES = "ro.sf.hwrotation";
+ 
+     private static final String DENSITY_OVERRIDE = "ro.config.density_override";
+     private static final String SIZE_OVERRIDE = "ro.config.size_override";
+@@ -411,6 +414,11 @@ public class WindowManagerService extends IWindowManager.Stub
+      */
+     WindowState[] mRebuildTmp = new WindowState[20];
+ 
++    /**
++     * Check product characteristics.
++     */
++    boolean mIsTabletEnv;
++
+     IInputMethodManager mInputMethodManager;
+ 
+     DisplayMagnifier mDisplayMagnifier;
+@@ -440,6 +448,8 @@ public class WindowManagerService extends IWindowManager.Stub
+     int mRotation = 0;
+     int mForcedAppOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+     boolean mAltOrientation = false;
++    boolean mRotateOnBoot = false;
++    boolean mFirstRotate = false;
+     class RotationWatcher {
+         IRotationWatcher watcher;
+         IBinder.DeathRecipient dr;
+@@ -799,6 +809,8 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+         mAnimator = new WindowAnimator(this);
+ 
++        mRotateOnBoot = isWindowFakeRotation();
++        mIsTabletEnv = isTabletEnv();
+         initPolicy(UiThread.getHandler());
+ 
+         // Add ourself to the Watchdog monitors.
+@@ -6210,6 +6222,14 @@ public class WindowManagerService extends IWindowManager.Stub
+                 "0".equals(SystemProperties.get(SYSTEM_DEBUGGABLE, "0"));
+     }
+ 
++    private boolean isWindowFakeRotation() {
++        return "true".equals(SystemProperties.get(WINDOW_FAKE_ROTATION, "false"));
++    }
++
++    private boolean isTabletEnv() {
++        return (SystemProperties.getInt(WINDOW_ROTATION_DEGREES,0) % 180 ) == 90;
++    }
++
+     /**
+      * Stops the view server if it exists.
+      *
+@@ -6693,6 +6713,7 @@ public class WindowManagerService extends IWindowManager.Stub
+         if (config != null) {
+             config.orientation = (dw <= dh) ? Configuration.ORIENTATION_PORTRAIT :
+                     Configuration.ORIENTATION_LANDSCAPE;
++//            config.rotation = mRotation;
+         }
+ 
+         // Update application display metrics.
+diff --git a/services/jni/com_android_server_input_InputManagerService.cpp b/services/jni/com_android_server_input_InputManagerService.cpp
+index 87928e2..bdbd194 100644
+--- a/services/jni/com_android_server_input_InputManagerService.cpp
++++ b/services/jni/com_android_server_input_InputManagerService.cpp
+@@ -34,6 +34,7 @@
+ #include <utils/Log.h>
+ #include <utils/Looper.h>
+ #include <utils/threads.h>
++#include <cutils/properties.h>
+ 
+ #include <input/InputManager.h>
+ #include <input/PointerController.h>
+@@ -137,8 +138,8 @@ static void loadSystemIconAsSprite(JNIEnv* env, jobject contextObj, int32_t styl
+             contextObj, style, &pointerIcon);
+     if (!status) {
+         pointerIcon.bitmap.copyTo(&outSpriteIcon->bitmap, SkBitmap::kARGB_8888_Config);
+-        outSpriteIcon->hotSpotX = pointerIcon.hotSpotX;
+-        outSpriteIcon->hotSpotY = pointerIcon.hotSpotY;
++        outSpriteIcon->hotSpotX = pointerIcon.hotSpotX - 8;
++        outSpriteIcon->hotSpotY = pointerIcon.hotSpotY - 8;
+     }
+ }
+ 
+@@ -247,6 +248,8 @@ private:
+ 
+         // Pointer controller singleton, created and destroyed as needed.
+         wp<PointerController> pointerController;
++
++        int hardwareRotation;
+     } mLocked;
+ 
+     void updateInactivityTimeoutLocked(const sp<PointerController>& controller);
+@@ -281,6 +284,19 @@ NativeInputManager::NativeInputManager(jobject contextObj,
+         mLocked.pointerGesturesEnabled = true;
+         mLocked.showTouches = false;
+         mLocked.stylusIconEnabled = false;
++        mLocked.hardwareRotation = 0;
++        char property[PROPERTY_VALUE_MAX];
++        if (property_get("ro.sf.hwrotation", property, "0") > 0) {
++            if (atoi(property) == 90) {
++      			mLocked.hardwareRotation = 270 / 90;
++            }
++            else if (atoi(property) == 270) {
++      			mLocked.hardwareRotation = 90 / 90;
++            }
++            else {
++      			mLocked.hardwareRotation = atoi(property) / 90;
++            }
++        }
+     }
+ 
+     sp<EventHub> eventHub = new EventHub();
+@@ -317,10 +333,15 @@ void NativeInputManager::setDisplayViewport(bool external, const DisplayViewport
+     {
+         AutoMutex _l(mLock);
+ 
++        DisplayViewport convertViewport;
++        convertViewport.copyFrom(viewport);
++    
++        convertViewport.orientation = (mLocked.hardwareRotation + convertViewport.orientation) % 4;
++
+         DisplayViewport& v = external ? mLocked.externalViewport : mLocked.internalViewport;
+-        if (v != viewport) {
++        if (v != convertViewport) {
+             changed = true;
+-            v = viewport;
++            v = convertViewport;
+ 
+             if (!external) {
+                 sp<PointerController> controller = mLocked.pointerController.promote();
+@@ -328,7 +349,7 @@ void NativeInputManager::setDisplayViewport(bool external, const DisplayViewport
+                     controller->setDisplayViewport(
+                             viewport.logicalRight - viewport.logicalLeft,
+                             viewport.logicalBottom - viewport.logicalTop,
+-                            viewport.orientation);
++                            convertViewport.orientation);
+                 }
+             }
+         }
+-- 
+1.9.1
+

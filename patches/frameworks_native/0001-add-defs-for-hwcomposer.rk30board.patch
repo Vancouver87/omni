@@ -1,0 +1,1978 @@
+From 9a8f50e800dc2f6a995ae1b323b994df118ff09f Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Wed, 13 Aug 2014 22:10:03 +0200
+Subject: [PATCH 1/2] add defs for hwcomposer.rk30board
+
+Change-Id: I97b1326b2c7398efdc196ac78eefb4ef29fca11c
+---
+ include/gui/BufferQueue.h                          |   1 +
+ include/gui/GLConsumer.h                           |   3 +
+ include/gui/Surface.h                              |   2 +
+ libs/gui/Android.mk                                |   5 +
+ libs/gui/BufferQueue.cpp                           | 132 ++++++++++-
+ libs/gui/GLConsumer.cpp                            |  32 ++-
+ libs/gui/Surface.cpp                               | 255 ++++++++++++++++++++-
+ opengl/include/EGL/eglext.h                        |  14 ++
+ opengl/libs/EGL/eglApi.cpp                         |  48 ++++
+ opengl/libs/EGL/egl_entries.in                     |   1 +
+ opengl/libs/EGL/egldefs.h                          |   2 +-
+ services/surfaceflinger/Android.mk                 |   8 +
+ services/surfaceflinger/DisplayDevice.cpp          |  51 ++++-
+ services/surfaceflinger/DisplayDevice.h            |  12 +-
+ .../DisplayHardware/FramebufferSurface.cpp         |   2 +-
+ .../surfaceflinger/DisplayHardware/HWComposer.cpp  | 102 ++++++++-
+ .../surfaceflinger/DisplayHardware/HWComposer.h    |   6 +
+ .../DisplayHardware/VirtualDisplaySurface.cpp      |   2 +-
+ services/surfaceflinger/Layer.cpp                  | 108 ++++++++-
+ services/surfaceflinger/Layer.h                    |   7 +
+ services/surfaceflinger/SurfaceFlinger.cpp         | 184 +++++++++++++--
+ services/surfaceflinger/SurfaceFlinger.h           |  28 ++-
+ 22 files changed, 948 insertions(+), 57 deletions(-)
+
+diff --git a/include/gui/BufferQueue.h b/include/gui/BufferQueue.h
+index 942a091..9faf892 100644
+--- a/include/gui/BufferQueue.h
++++ b/include/gui/BufferQueue.h
+@@ -575,6 +575,7 @@ private:
+ 
+     // mConnectedProducerToken is used to set a binder death notification on the producer
+     sp<IBinder> mConnectedProducerToken;
++    uint32_t IsCTS;
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/include/gui/GLConsumer.h b/include/gui/GLConsumer.h
+index a5fdfb9..6f3cb44 100644
+--- a/include/gui/GLConsumer.h
++++ b/include/gui/GLConsumer.h
+@@ -93,6 +93,7 @@ public:
+     //
+     // This calls doGLFenceWait to ensure proper synchronization.
+     status_t updateTexImage();
++    status_t  ReleaseOldBuffer();
+ 
+     // releaseTexImage releases the texture acquired in updateTexImage().
+     // This is intended to be used in single buffer mode.
+@@ -425,6 +426,8 @@ private:
+     // that no buffer is bound to the texture. A call to setBufferCount will
+     // reset mCurrentTexture to INVALID_BUFFER_SLOT.
+     int mCurrentTexture;
++    int mCurrentTextureOld;     //rk : for lcdc composer
++    sp<GraphicBuffer> mCurrentTextureBufOld;
+ 
+     // mAttached indicates whether the ConsumerBase is currently attached to
+     // an OpenGL ES context.  For legacy reasons, this is initialized to true,
+diff --git a/include/gui/Surface.h b/include/gui/Surface.h
+index a08f2a1..6d5ee27 100644
+--- a/include/gui/Surface.h
++++ b/include/gui/Surface.h
+@@ -157,6 +157,8 @@ protected:
+ #endif
+ 
+ public:
++    virtual int changehw(int rotation);
++    bool shouldchange;
+     virtual int lock(ANativeWindow_Buffer* outBuffer, ARect* inOutDirtyBounds);
+     virtual int unlockAndPost();
+ 
+diff --git a/libs/gui/Android.mk b/libs/gui/Android.mk
+index 841382e..b441137 100644
+--- a/libs/gui/Android.mk
++++ b/libs/gui/Android.mk
+@@ -68,6 +68,7 @@ endif
+ 
+ LOCAL_MODULE:= libgui
+ 
++LOCAL_CFLAGS += -DDONT_USE_FENCE_SYNC
+ ifeq ($(TARGET_BOARD_PLATFORM), tegra)
+ 	LOCAL_CFLAGS += -DDONT_USE_FENCE_SYNC
+ endif
+@@ -85,6 +86,10 @@ ifeq ($(SENSORS_NEED_SETRATE_ON_ENABLE), true)
+         LOCAL_CFLAGS += -DSENSORS_SETRATE_ON_ENABLE
+ endif
+ 
++ifeq ($(strip $(BOARD_USE_LCDC_COMPOSER)),true)
++LOCAL_CFLAGS += -DUSE_LCDC_COMPOSER
++endif
++
+ include $(BUILD_SHARED_LIBRARY)
+ 
+ ifeq (,$(ONE_SHOT_MAKEFILE))
+diff --git a/libs/gui/BufferQueue.cpp b/libs/gui/BufferQueue.cpp
+index 6961190..addcbe8 100644
+--- a/libs/gui/BufferQueue.cpp
++++ b/libs/gui/BufferQueue.cpp
+@@ -32,6 +32,7 @@
+ #include <utils/Log.h>
+ #include <utils/Trace.h>
+ #include <utils/CallStack.h>
++#include "../../../../hardware/rk29/libgralloc_ump/gralloc_priv.h"
+ 
+ // Macros for including the BufferQueue name in log messages
+ #define ST_LOGV(x, ...) ALOGV("[%s] "x, mConsumerName.string(), ##__VA_ARGS__)
+@@ -65,6 +66,15 @@ static const char* scalingModeName(int scalingMode) {
+     }
+ }
+ 
++#include <cutils/properties.h>
++static int UseLcdcComposer = 0;
++typedef struct _cts_data {
++     int vir_cnt ;
++     int uname_cnt ;
++     int uname_read_cnt;
++} cts_data;
++
++cts_data gcts_bq = {0,};
+ BufferQueue::BufferQueue(const sp<IGraphicBufferAlloc>& allocator) :
+     mDefaultWidth(1),
+     mDefaultHeight(1),
+@@ -95,6 +105,22 @@ BufferQueue::BufferQueue(const sp<IGraphicBufferAlloc>& allocator) :
+     } else {
+         mGraphicBufferAlloc = allocator;
+     }
++    char value[PROPERTY_VALUE_MAX];
++    property_get("ro.sf.lcdc_composer", value, "0");
++    UseLcdcComposer = atoi(value);    
++	property_set("sys.glibgui", "1.001");
++
++    property_get("sys.cts_gts.status", value, "0");
++
++    IsCTS =  !strcmp(value,"true");
++    if(IsCTS)
++    {
++        system("mkdir /data/virt_cts/");          
++        system("chmod 777 /data/virt_cts/");
++    }
++
++	
++    //UseLcdcComposer = 1;
+ }
+ 
+ BufferQueue::~BufferQueue() {
+@@ -125,7 +151,8 @@ status_t BufferQueue::setDefaultBufferFormat(uint32_t defaultFormat) {
+ 
+ status_t BufferQueue::setConsumerUsageBits(uint32_t usage) {
+     Mutex::Autolock lock(mMutex);
+-    mConsumerUsageBits = usage;
++   // mConsumerUsageBits |= usage;
++		mConsumerUsageBits = usage;
+     return NO_ERROR;
+ }
+ 
+@@ -230,6 +257,9 @@ int BufferQueue::query(int what, int* outValue)
+     case NATIVE_WINDOW_CONSUMER_USAGE_BITS:
+         value = mConsumerUsageBits;
+         break;
++    case 1000:  // rk : for lcdc composer, is BrowserActivity ?
++        value = strcmp(mConsumerName.string(), "com.android.browser/com.android.browser.BrowserActivity") ? 0 : 1;
++        break;
+     default:
+         return BAD_VALUE;
+     }
+@@ -259,11 +289,20 @@ status_t BufferQueue::requestBuffer(int slot, sp<GraphicBuffer>* buf) {
+     return NO_ERROR;
+ }
+ 
++static int fbFd = -1;
++#define RK_FBIOSET_CONFIG_DONE		0x4628
+ status_t BufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence, bool async,
+         uint32_t w, uint32_t h, uint32_t format, uint32_t usage) {
+     ATRACE_CALL();
+     ST_LOGV("dequeueBuffer: w=%d h=%d fmt=%#x usage=%#x", w, h, format, usage);
+-
++   // struct timeval tpend1, tpend2;
++  //  long usec1 = 0;
++#ifdef USE_LCDC_COMPOSER
++    if(w == -1 && h == -2){
++        w = mDefaultHeight;
++        h = mDefaultWidth;
++    }
++#endif
+     if ((w && !h) || (!w && h)) {
+         ST_LOGE("dequeueBuffer: invalid size: w=%u, h=%u", w, h);
+         return BAD_VALUE;
+@@ -472,6 +511,19 @@ status_t BufferQueue::dequeueBuffer(int *outBuf, sp<Fence>* outFence, bool async
+             mSlots[*outBuf].mFrameNumber,
+             mSlots[*outBuf].mGraphicBuffer->handle, returnFlags);
+ 
++    #if 0
++    if(UseLcdcComposer)
++    {
++        if(fbFd < 0)
++            fbFd = open("/dev/graphics/fb0", O_RDWR, 0);
++        if(fbFd < 0) 
++            ALOGE("dev/graphics/fb0 open failed");
++        int sync = 3;
++        if(fbFd >= 0)
++        	ioctl(fbFd, RK_FBIOSET_CONFIG_DONE, &sync);
++
++    }
++    #endif
+     return returnFlags;
+ }
+ 
+@@ -507,6 +559,37 @@ status_t BufferQueue::queueBuffer(int buf,
+             return -EINVAL;
+     }
+ 
++    if(IsCTS)
++    {
++        if(!strcmp(mConsumerName.string(),"Encode Virtual Test"))
++        {
++
++            FILE * pfile = NULL;
++            char layername[64] ; 
++            char cmd[64];
++            int bpp = 4;
++            struct private_handle_t* buffhnd = (struct private_handle_t*)mSlots[buf].mGraphicBuffer->handle;
++            if(HAL_PIXEL_FORMAT_RGB_565 == buffhnd->format)
++                bpp = 2;
++            else if(HAL_PIXEL_FORMAT_RGB_888 == buffhnd->format)
++                bpp = 3;
++
++           // ALOGD("dumpVirtual  write addr=%x,[%dx%d],fomt=%d,gvir_cnt=%d",buffhnd->base,buffhnd->width,buffhnd->height,buffhnd->format,gcts_bq.vir_cnt);
++
++            sprintf(layername,"/data/virt_cts/vir%d.bin",gcts_bq.vir_cnt);				
++            pfile = fopen(layername,"wb");
++            if(pfile)
++            { 
++                fwrite(( void *)buffhnd->base,(size_t)(buffhnd->width * buffhnd->height *bpp ),1,pfile);
++                fclose(pfile);
++                sprintf(cmd,"chmod 777 %s",layername);
++                system(cmd);    
++            }
++            gcts_bq.vir_cnt++; 
++            if(gcts_bq.vir_cnt >=6)
++                gcts_bq.vir_cnt =0;
++        }
++    }    
+     sp<IConsumerListener> listener;
+ 
+     { // scope for the lock
+@@ -976,9 +1059,50 @@ status_t BufferQueue::acquireBuffer(BufferItem *buffer, nsecs_t expectedPresent)
+     *buffer = *front;
+     ATRACE_BUFFER_INDEX(buf);
+ 
+-    ST_LOGV("acquireBuffer: acquiring { slot=%d/%llu, buffer=%p }",
++    struct private_handle_t* buffhnd = (struct private_handle_t*)front->mGraphicBuffer->handle;
++    ST_LOGV("acquireBuffer: acquiring { slot=%d/%llu, buffer=%p,addr=%x }",
+             front->mBuf, front->mFrameNumber,
+-            front->mGraphicBuffer->handle);
++            front->mGraphicBuffer->handle,buffhnd->base);
++
++    if(IsCTS)
++    {
++        
++        if(strstr(mConsumerName.string(),"unnamed")) 
++        {
++             
++            FILE * pfile = NULL;
++            char layername[64] ;
++            char cmd[64]; 
++            int bpp = 4; 
++            
++            if(HAL_PIXEL_FORMAT_RGB_565 == buffhnd->format)
++                bpp = 2;
++            else if(HAL_PIXEL_FORMAT_RGB_888 == buffhnd->format)
++                bpp = 3;
++            sprintf(layername,"/data/virt_cts/vir%d.bin",gcts_bq.uname_cnt);				
++            pfile = fopen(layername,"rb"); 
++            //ALOGD("dumpVirtual pfile=%p,name=%s",pfile,layername);
++            if(pfile)
++            {
++                //ALOGD("dumpVirtual  read addr=%x,[%dx%d],filename=%s,bpp=%d",buffhnd->base,buffhnd->width,buffhnd->height,layername,bpp);
++
++                fread(( void *)buffhnd->base,(size_t)( buffhnd->width * buffhnd->height *bpp ),1,pfile);
++                fclose(pfile);
++                
++                //memcpy(( void *)((int)(buffhnd->base) + buffhnd->width * buffhnd->height / 2 ),( void *)buffhnd->base,(size_t)( buffhnd->width * buffhnd->height /2));
++                //memcpy(( void *)((int)(buffhnd->base) + buffhnd->width * buffhnd->height  ),( void *)buffhnd->base,(size_t)( buffhnd->width * buffhnd->height ));                
++                //memcpy(( void *)((int)(buffhnd->base) + buffhnd->width * buffhnd->height *2 ),( void *)buffhnd->base,(size_t)( buffhnd->width * buffhnd->height*2));
++                gcts_bq.uname_cnt++;
++                if(gcts_bq.uname_cnt >=6 )
++                {
++                    sprintf(cmd,"rm /data/virt_cts/*");
++                    system(cmd);    
++                } 
++            }
++
++        }    
++    }
++
+     // if front buffer still being tracked update slot state
+     if (stillTracking(front)) {
+         mSlots[buf].mAcquireCalled = true;
+diff --git a/libs/gui/GLConsumer.cpp b/libs/gui/GLConsumer.cpp
+index 7ee3081..4cb68e8 100644
+--- a/libs/gui/GLConsumer.cpp
++++ b/libs/gui/GLConsumer.cpp
+@@ -40,6 +40,7 @@
+ #include <utils/Log.h>
+ #include <utils/String8.h>
+ #include <utils/Trace.h>
++#include <cutils/properties.h>
+ 
+ EGLAPI const char* eglQueryStringImplementationANDROID(EGLDisplay dpy, EGLint name);
+ #define CROP_EXT_STR "EGL_ANDROID_image_crop"
+@@ -116,6 +117,7 @@ static bool isEglImageCroppable(const Rect& crop) {
+     return hasEglAndroidImageCrop() && (crop.left == 0 && crop.top == 0);
+ }
+ 
++static int UseLcdcComposer = 0;
+ GLConsumer::GLConsumer(const sp<IGraphicBufferConsumer>& bq, uint32_t tex,
+         uint32_t texTarget, bool useFenceSync, bool isControlledByApp) :
+     ConsumerBase(bq, isControlledByApp),
+@@ -133,6 +135,7 @@ GLConsumer::GLConsumer(const sp<IGraphicBufferConsumer>& bq, uint32_t tex,
+     mEglDisplay(EGL_NO_DISPLAY),
+     mEglContext(EGL_NO_CONTEXT),
+     mCurrentTexture(BufferQueue::INVALID_BUFFER_SLOT),
++    mCurrentTextureOld(BufferQueue::INVALID_BUFFER_SLOT),    
+     mAttached(true)
+ {
+     ST_LOGV("GLConsumer");
+@@ -141,6 +144,9 @@ GLConsumer::GLConsumer(const sp<IGraphicBufferConsumer>& bq, uint32_t tex,
+             sizeof(mCurrentTransformMatrix));
+ 
+     mConsumer->setConsumerUsageBits(DEFAULT_USAGE_FLAGS);
++    char value[PROPERTY_VALUE_MAX];
++    property_get("ro.sf.lcdc_composer", value, "0");
++    UseLcdcComposer = atoi(value);
+ }
+ 
+ status_t GLConsumer::setDefaultMaxBufferCount(int bufferCount) {
+@@ -204,6 +210,23 @@ status_t GLConsumer::updateTexImage() {
+     return bindTextureImageLocked();
+ }
+ 
++status_t  GLConsumer::ReleaseOldBuffer()
++{
++    status_t err = NO_ERROR;
++    Mutex::Autolock lock(mMutex);
++    if (mCurrentTextureOld != BufferQueue::INVALID_BUFFER_SLOT) {
++        status_t status = releaseBufferLocked(
++                    mCurrentTextureOld, mCurrentTextureBufOld, mEglDisplay,
++                    mEglSlots[mCurrentTextureOld].mEglFence);                
++        if (status < NO_ERROR) {
++                ST_LOGE("updateAndRelease: failed to release buffer: %s (%d)",
++                       strerror(-status), status);
++                err = status;
++        }
++        mCurrentTextureOld = BufferQueue::INVALID_BUFFER_SLOT;
++    }
++    return err;
++}
+ 
+ status_t GLConsumer::releaseTexImage() {
+     ATRACE_CALL();
+@@ -401,6 +424,13 @@ status_t GLConsumer::updateAndReleaseLocked(const BufferQueue::BufferItem& item)
+             buf, mSlots[buf].mGraphicBuffer->handle);
+ 
+     // release old buffer
++    if(UseLcdcComposer && !strstr(mName.string(), "unnamed"))
++    {
++        mCurrentTextureOld = mCurrentTexture;
++        mCurrentTextureBufOld = mCurrentTextureBuf;
++    }
++    else
++    {
+     if (mCurrentTexture != BufferQueue::INVALID_BUFFER_SLOT) {
+         status_t status = releaseBufferLocked(
+                 mCurrentTexture, mCurrentTextureBuf, mEglDisplay,
+@@ -412,7 +442,7 @@ status_t GLConsumer::updateAndReleaseLocked(const BufferQueue::BufferItem& item)
+             // keep going, with error raised [?]
+         }
+     }
+-
++    }
+     // Update the GLConsumer state.
+     mCurrentTexture = buf;
+     mCurrentTextureBuf = mSlots[buf].mGraphicBuffer;
+diff --git a/libs/gui/Surface.cpp b/libs/gui/Surface.cpp
+index cb9d793..c9cca8f 100644
+--- a/libs/gui/Surface.cpp
++++ b/libs/gui/Surface.cpp
+@@ -33,6 +33,13 @@
+ #include <gui/Surface.h>
+ 
+ #include <private/gui/ComposerService.h>
++#include <cutils/properties.h>
++
++#ifdef USE_LCDC_COMPOSER
++#include <hardware/rga.h>
++#include <fcntl.h>
++#endif
++#include <cutils/properties.h>
+ 
+ #ifdef QCOM_BSP
+ #include <gralloc_priv.h>
+@@ -42,11 +49,33 @@
+ #endif //VFM_AVAILABLE
+ #endif
+ namespace android {
++static int UseLcdcComposer = 0;
++static int ModFormatProg = 0;
++char* GetProgramName(char* buf, int size)
++{
++    char procName[64];
++    pid_t pid = getpid();
++    FILE* fp = NULL;
++    snprintf(procName, sizeof(procName), "/proc/%i/cmdline", pid);
++    fp = fopen(procName, "r");
++    if(fp)
++    {
++        fread(buf, 1, size, fp);
++        fclose(fp);
++        fp = NULL;
++    }
++    else
++    {
++        ALOGD("%s : %d : open file %s failed \n", __FUNCTION__, __LINE__, procName);
++    }
++    return buf;
++}
+ 
+ Surface::Surface(
+         const sp<IGraphicBufferProducer>& bufferProducer,
+         bool controlledByApp)
+     : mGraphicBufferProducer(bufferProducer)
++    ,shouldchange(false)
+ {
+     // Initialize the ANativeWindow function pointers.
+     ANativeWindow::setSwapInterval  = hook_setSwapInterval;
+@@ -87,6 +116,20 @@ Surface::Surface(
+ #ifdef SURFACE_SKIP_FIRST_DEQUEUE
+     mDequeuedOnce = false;
+ #endif
++    char value[PROPERTY_VALUE_MAX];
++    property_get("ro.sf.lcdc_composer", value, "0");
++    UseLcdcComposer = atoi(value);
++    //UseLcdcComposer = 1;
++    if(UseLcdcComposer) {
++        char exeName[64] = {0};
++        GetProgramName(exeName, 64 - 1);
++        if(0 == strcmp("com.android.browser", exeName)) {
++            ModFormatProg = 1;
++        }
++        else {
++            ModFormatProg = 0;
++        }
++    }
+ }
+ 
+ Surface::~Surface() {
+@@ -198,6 +241,39 @@ int Surface::dequeueBuffer(android_native_buffer_t** buffer, int* fenceFd) {
+     int buf = -1;
+     int reqW = mReqWidth ? mReqWidth : mUserWidth;
+     int reqH = mReqHeight ? mReqHeight : mUserHeight;
++    if(UseLcdcComposer) {
++        switch(ModFormatProg)
++        {
++        case 1: //com.android.browser
++            if(reqW==0 && reqH==0) {
++                int isBrowserActivity = 0;
++                mGraphicBufferProducer->query(1000, &isBrowserActivity);
++                if(isBrowserActivity) {
++                    static int MaxWidth = 0, MaxHeight = 0;
++                    if(mDefaultWidth > MaxWidth)    MaxWidth = mDefaultWidth;
++                    if(mDefaultHeight > MaxHeight)  MaxHeight = mDefaultHeight;
++                    if(mDefaultWidth==MaxWidth || mDefaultHeight==MaxHeight) {
++                        char value[PROPERTY_VALUE_MAX];
++                        property_get("sys.video.fullscreen", value, "0");
++                        if(atoi(value)==0) {
++                            if(mReqFormat == 1)  mReqFormat = 4;
++                        } else {
++                            if(mReqFormat == 4)  mReqFormat = 1;
++                        }
++                    }
++                }
++            }
++            break;      
++        default:
++            break;
++        }
++    }
++#ifdef USE_LCDC_COMPOSER
++	 if(shouldchange){
++        reqW = -1;
++        reqH = -2;
++    }
++#endif
+     sp<Fence> fence;
+     status_t result = mGraphicBufferProducer->dequeueBuffer(&buf, &fence, mSwapIntervalZero,
+             reqW, reqH, mReqFormat, mReqUsage);
+@@ -758,7 +834,9 @@ void Surface::freeAllBuffers() {
+ 
+ // ----------------------------------------------------------------------
+ // the lock/unlock APIs must be used from the same thread
+-
++#ifdef USE_LCDC_COMPOSER
++static int fd_rga = -1;
++#endif
+ static status_t copyBlt(
+         const sp<GraphicBuffer>& dst,
+         const sp<GraphicBuffer>& src,
+@@ -775,6 +853,7 @@ static status_t copyBlt(
+     err = dst->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, reg.bounds(), (void**)&dst_bits);
+     ALOGE_IF(err, "error locking dst buffer %s", strerror(-err));
+ 
++#ifndef USE_LCDC_COMPOSER
+     Region::const_iterator head(reg.begin());
+     Region::const_iterator tail(reg.end());
+     if (head != tail && src_bits && dst_bits) {
+@@ -801,6 +880,121 @@ static status_t copyBlt(
+         }
+     }
+ 
++#else
++    int32_t vir_w = 0, vir_h = 0;
++    Region::const_iterator head_(reg.begin());
++    Region::const_iterator tail_(reg.end());
++    if (head_ != tail_ && src_bits && dst_bits) {
++        while (head_ != tail_) {
++            const Rect& r(*head_++);
++            ssize_t h_ = r.height();
++            if (h_ <= 0) continue;
++            int32_t tmp_w = r.right;
++            int32_t tmp_h = r.bottom;
++            vir_w = (vir_w >= tmp_w) ? vir_w : tmp_w;
++            vir_h = (vir_h >= tmp_h) ? vir_h : tmp_h;
++        }
++    }
++    head_ = reg.begin();
++    if (head_ != tail_ && src_bits && dst_bits) {
++        //const size_t bpp = bytesPerPixel(src->format);
++        bool needsync = false;
++        struct rga_req  Rga_Request;
++        if(fd_rga < 0){
++            property_set("sys.gui.version", "1.04");
++            fd_rga = open("/dev/rga",O_RDWR,0);
++            if(fd_rga < 0){
++                ALOGE(" rga open err");
++                goto ERROR;
++            }
++        }
++        while (head_ != tail_) {
++            if(needsync){
++                if(ioctl(fd_rga, RGA_BLIT_ASYNC, &Rga_Request) != 0){
++                    ALOGE("              rga ioctl  RGA_BLIT_ASYNC  err !!!!!!    fd_rga = %d", fd_rga);
++                    goto ERROR;
++                }
++            }
++            const Rect& r(*head_++);
++            ssize_t h = r.height();
++            if (h <= 0) continue;
++
++            memset(&Rga_Request,0x0,sizeof(Rga_Request));
++            //set src info
++            Rga_Request.src.yrgb_addr =  (int)src_bits; //(int)s;
++            Rga_Request.src.uv_addr  = 0;
++            Rga_Request.src.v_addr   =  Rga_Request.src.uv_addr;
++            Rga_Request.src.vir_w = src->stride;
++            Rga_Request.src.vir_h = vir_h;
++            Rga_Request.src.format = 0x0;               // RK_FORMAT_RGBA_8888
++            Rga_Request.src.act_w = r.width();
++            Rga_Request.src.act_h = r.height();
++            Rga_Request.src.x_offset = r.left;
++            Rga_Request.src.y_offset = r.top;
++
++            //set dst info
++            Rga_Request.dst.yrgb_addr = (int)dst_bits;  //(int)d;
++            Rga_Request.dst.uv_addr  = 0;
++            Rga_Request.dst.v_addr   = Rga_Request.dst.uv_addr;
++            Rga_Request.dst.vir_w = dst->stride;
++            Rga_Request.dst.vir_h = vir_h;
++            Rga_Request.dst.act_w = r.width();
++            Rga_Request.dst.act_h = r.height();
++            Rga_Request.clip.xmin = 0;
++            Rga_Request.clip.xmax = Rga_Request.dst.vir_w - 1;
++            Rga_Request.clip.ymin = 0;
++            Rga_Request.clip.ymax = Rga_Request.dst.vir_h - 1;
++            Rga_Request.dst.x_offset = r.left;
++            Rga_Request.dst.y_offset = r.top;
++            
++            Rga_Request.sina = 0;
++            Rga_Request.cosa = 0x10000;
++            Rga_Request.dst.format = 0x0;               // RK_FORMAT_RGBA_8888
++
++            Rga_Request.alpha_rop_flag |= (1 << 5);
++
++            Rga_Request.mmu_info.mmu_en    = 1;
++            Rga_Request.mmu_info.mmu_flag  = ((2 & 0x3) << 4) | 1;
++
++            needsync = true;
++        }
++        if(needsync){
++            if(ioctl(fd_rga, RGA_BLIT_ASYNC, &Rga_Request) != 0){
++                ALOGE("          %s(%d):  RGA_BLIT_ASYNC Failed  err !!!!!!     fd_rga = %d ", __FUNCTION__, __LINE__, fd_rga);
++                ALOGE("          src info: yrgb_addr=%x, uv_addr=%x,v_addr=%x,"
++                 "vir_w=%d,vir_h=%d,format=%d,"
++                 "act_x_y_w_h [%d,%d,%d,%d] ",
++                                Rga_Request.src.yrgb_addr, Rga_Request.src.uv_addr ,Rga_Request.src.v_addr,
++                                Rga_Request.src.vir_w ,Rga_Request.src.vir_h ,Rga_Request.src.format ,
++                                Rga_Request.src.x_offset ,
++                                Rga_Request.src.y_offset,
++                                Rga_Request.src.act_w ,
++                                Rga_Request.src.act_h
++
++                );
++
++                ALOGE("          dst info: yrgb_addr=%x, uv_addr=%x,v_addr=%x,"
++                 "vir_w=%d,vir_h=%d,format=%d,"
++                 "clip[%d,%d,%d,%d], "
++                 "act_x_y_w_h [%d,%d,%d,%d] ",
++                                Rga_Request.dst.yrgb_addr, Rga_Request.dst.uv_addr ,Rga_Request.dst.v_addr,
++                                Rga_Request.dst.vir_w ,Rga_Request.dst.vir_h ,Rga_Request.dst.format,
++                                Rga_Request.clip.xmin,
++                                Rga_Request.clip.xmax,
++                                Rga_Request.clip.ymin,
++                                Rga_Request.clip.ymax,
++                                Rga_Request.dst.x_offset ,
++                                Rga_Request.dst.y_offset,
++                                Rga_Request.dst.act_w ,
++                                Rga_Request.dst.act_h
++
++                );
++               goto ERROR;
++            }
++        }
++    }
++ERROR:
++#endif
+     if (src_bits)
+         src->unlock();
+ 
+@@ -811,6 +1005,33 @@ static status_t copyBlt(
+ }
+ 
+ // ----------------------------------------------------------------------------
++status_t Surface::changehw(int rotation)
++{
++#ifdef USE_LCDC_COMPOSER
++    switch(rotation){
++        case 1:	// 0:
++            mTransform = 7;	//Transform::ROT_90 == 4; Transform::ROT_270 == 7;
++            shouldchange = true;
++            break;
++        case 3:	// 2:
++            mTransform = 4;	//Transform::ROT_90 == 4; Transform::ROT_270 == 7;
++            shouldchange = true;
++            break;
++        case 2:	// 3:
++            mTransform = 3;	//Transform::ROT_180 == 3;
++            shouldchange = false;
++            break;
++        case 0: // 1:
++            mTransform = 0;
++            shouldchange = false;
++            break;
++	    default:
++		    mTransform = 0;
++            shouldchange = false;
++    }
++#endif
++    return INVALID_OPERATION;
++}
+ 
+ status_t Surface::lock(
+         ANativeWindow_Buffer* outBuffer, ARect* inOutDirtyBounds)
+@@ -856,6 +1077,31 @@ status_t Surface::lock(
+ 
+         Region newDirtyRegion;
+         if (inOutDirtyBounds) {
++#ifdef USE_LCDC_COMPOSER
++            int32_t tmp_l = inOutDirtyBounds->left;
++            int32_t tmp_r = inOutDirtyBounds->right;
++            int32_t tmp_t = inOutDirtyBounds->top;
++            int32_t tmp_b = inOutDirtyBounds->bottom;
++            if(mTransform == 4){
++                inOutDirtyBounds->left = tmp_t;
++                inOutDirtyBounds->right = tmp_b;
++                inOutDirtyBounds->top = backBuffer->height - tmp_r;
++                inOutDirtyBounds->bottom = backBuffer->height - tmp_l;
++            }
++            if(mTransform == 3){
++                inOutDirtyBounds->left = backBuffer->width - tmp_r;
++                inOutDirtyBounds->right = backBuffer->width - tmp_l;
++                inOutDirtyBounds->top = backBuffer->height - tmp_b;
++                inOutDirtyBounds->bottom = backBuffer->height - tmp_t;
++            }
++            if(mTransform == 7){
++                inOutDirtyBounds->left = backBuffer->width - tmp_b;
++                inOutDirtyBounds->right = backBuffer->width - tmp_t;;
++                inOutDirtyBounds->top = tmp_l;
++                inOutDirtyBounds->bottom = tmp_r;
++            }
++#endif
++
+             newDirtyRegion.set(static_cast<Rect const&>(*inOutDirtyBounds));
+             newDirtyRegion.andSelf(bounds);
+         } else {
+@@ -960,6 +1206,13 @@ status_t Surface::unlockAndPost()
+ 
+     mPostedBuffer = mLockedBuffer;
+     mLockedBuffer = 0;
++#ifdef USE_LCDC_COMPOSER
++    if(fd_rga != -1){
++        if(ioctl(fd_rga, RGA_FLUSH, NULL) != 0) {
++            ALOGE("unlockAndPost RGA_FLUSH err,   fd_rga: %d,  err: %d ", fd_rga, err);
++        }
++    }
++#endif
+     return err;
+ }
+ 
+diff --git a/opengl/include/EGL/eglext.h b/opengl/include/EGL/eglext.h
+index 3b2984a..01c1437 100644
+--- a/opengl/include/EGL/eglext.h
++++ b/opengl/include/EGL/eglext.h
+@@ -283,6 +283,20 @@ typedef EGLImageKHR (EGLAPIENTRYP PFNEGLCREATEDRMIMAGEMESAPROC) (EGLDisplay dpy,
+ typedef EGLBoolean (EGLAPIENTRYP PFNEGLEXPORTDRMIMAGEMESAPROC) (EGLDisplay dpy, EGLImageKHR image, EGLint *name, EGLint *handle, EGLint *stride);
+ #endif
+ 
++#ifndef EGL_ANDROID_get_render_buffer
++#define EGL_ANDROID_get_render_buffer 1
++#ifdef EGL_EGLEXT_PROTOTYPES
++EGLAPI EGLClientBuffer EGLAPIENTRY eglGetRenderBufferANDROID(EGLDisplay dpy, EGLSurface draw);
++EGLAPI EGLBoolean EGLAPIENTRY eglRenderBufferModifiedANDROID(EGLDisplay dpy, EGLSurface draw);
++#endif
++typedef EGLClientBuffer (EGLAPIENTRYP PFNEGLGETRENDERBUFFERANDROIDPROC) (EGLDisplay dpy, EGLSurface draw);
++typedef EGLBoolean (EGLAPIENTRYP PFNEGLRENDERBUFFERMODIFYEDANDROIDPROC) (EGLDisplay dpy, EGLSurface draw);
++
++#endif
++
++EGLAPI void EGLAPIENTRY eglSetImplementationAndroid(EGLBoolean impl);
++typedef void (EGLAPIENTRYP PFNEGLSETIMPLEMENTATIONANDROIDPROC) (EGLBoolean impl);
++
+ #ifndef EGL_NV_post_sub_buffer
+ #define EGL_NV_post_sub_buffer 1
+ #define EGL_POST_SUB_BUFFER_SUPPORTED_NV	0x30BE
+diff --git a/opengl/libs/EGL/eglApi.cpp b/opengl/libs/EGL/eglApi.cpp
+index 0cc5265..67169e3 100644
+--- a/opengl/libs/EGL/eglApi.cpp
++++ b/opengl/libs/EGL/eglApi.cpp
+@@ -132,6 +132,13 @@ static const extention_map_t sExtensionMap[] = {
+             (__eglMustCastToProperFunctionPointerType)&eglCreateSyncKHR },
+     { "eglDestroySyncKHR",
+             (__eglMustCastToProperFunctionPointerType)&eglDestroySyncKHR },
++	{ "eglGetRenderBufferANDROID",
++            (__eglMustCastToProperFunctionPointerType)&eglGetRenderBufferANDROID }, 
++    { "eglRenderBufferModifiedANDROID",
++            (__eglMustCastToProperFunctionPointerType)&eglRenderBufferModifiedANDROID },
++    { "eglSetImplementationAndroid",
++            (__eglMustCastToProperFunctionPointerType)&eglSetImplementationAndroid },
++	
+     { "eglClientWaitSyncKHR",
+             (__eglMustCastToProperFunctionPointerType)&eglClientWaitSyncKHR },
+     { "eglSignalSyncKHR",
+@@ -1510,6 +1517,47 @@ EGLint eglWaitSyncKHR(EGLDisplay dpy, EGLSyncKHR sync, EGLint flags) {
+ // ----------------------------------------------------------------------------
+ // ANDROID extensions
+ // ----------------------------------------------------------------------------
++EGLClientBuffer eglGetRenderBufferANDROID(EGLDisplay dpy, EGLSurface draw)
++{
++    clearError();
++
++    //if (!validate_display(dpy)) return EGL_FALSE;
++
++    //SurfaceRef _s(draw);
++    //if (!_s.get())
++    //    return setError(EGL_BAD_SURFACE, EGL_FALSE);
++
++ 
++    egl_display_ptr   const dp = get_display(dpy);
++    egl_surface_t const * const s = get_surface(draw);
++    if (s->cnx->egl.eglGetRenderBufferANDROID) {
++	        return s->cnx->egl.eglGetRenderBufferANDROID(
++		                dp->disp.dpy, s->surface);		                  
++	    }
++	    return setError(EGL_BAD_DISPLAY, (EGLClientBuffer*)0);
++}
++
++//EGLBoolean eglRenderBufferModifiedANDROID(EGLDisplay dpy, EGLSurface draw){
++  //  return EGL_TRUE;
++//}
++
++EGLBoolean eglRenderBufferModifiedANDROID(EGLDisplay dpy, EGLSurface draw){
++
++    clearError();
++    egl_display_ptr  const dp = get_display(dpy);
++    egl_surface_t const * const s = get_surface(draw);
++    if (s->cnx->egl.eglGetRenderBufferANDROID) {
++            return s->cnx->egl.eglRenderBufferModifiedANDROID(
++                        dp->disp.dpy, s->surface);
++    }
++    return EGL_TRUE;
++}
++
++
++void eglSetImplementationAndroid(EGLBoolean impl)
++{
++	//gEGLImplSWOnly = impl;
++}
+ 
+ EGLint eglDupNativeFenceFDANDROID(EGLDisplay dpy, EGLSyncKHR sync)
+ {
+diff --git a/opengl/libs/EGL/egl_entries.in b/opengl/libs/EGL/egl_entries.in
+index 70d0e52..6cd1f33 100644
+--- a/opengl/libs/EGL/egl_entries.in
++++ b/opengl/libs/EGL/egl_entries.in
+@@ -81,6 +81,7 @@ EGL_ENTRY(EGLBoolean, eglSetSwapRectangleANDROID, EGLDisplay, EGLSurface, EGLint
+ EGL_ENTRY(EGLClientBuffer, eglGetRenderBufferANDROID, EGLDisplay, EGLSurface)
+ EGL_ENTRY(EGLint, eglDupNativeFenceFDANDROID, EGLDisplay, EGLSyncKHR)
+ 
++EGL_ENTRY(EGLBoolean, eglRenderBufferModifiedANDROID, EGLDisplay, EGLSurface)
+ /* NVIDIA extensions */
+ 
+ EGL_ENTRY(EGLuint64NV, eglGetSystemTimeFrequencyNV, void)
+diff --git a/opengl/libs/EGL/egldefs.h b/opengl/libs/EGL/egldefs.h
+index b905ea0..e31c38a 100644
+--- a/opengl/libs/EGL/egldefs.h
++++ b/opengl/libs/EGL/egldefs.h
+@@ -60,7 +60,7 @@ extern char const * const gl_names[];
+ extern char const * const egl_names[];
+ 
+ extern egl_connection_t gEGLImpl;
+-
++extern EGLBoolean gEGLImplSWOnly;
+ // ----------------------------------------------------------------------------
+ }; // namespace android
+ // ----------------------------------------------------------------------------
+diff --git a/services/surfaceflinger/Android.mk b/services/surfaceflinger/Android.mk
+index a68064e..b28fea5 100644
+--- a/services/surfaceflinger/Android.mk
++++ b/services/surfaceflinger/Android.mk
+@@ -95,6 +95,14 @@ else
+     LOCAL_CFLAGS += -DPRESENT_TIME_OFFSET_FROM_VSYNC_NS=0
+ endif
+ 
++ifeq ($(strip $(BOARD_USE_LCDC_COMPOSER)),true)
++LOCAL_CFLAGS += -DUSE_LCDC_COMPOSER
++ifeq ($(strip $(BOARD_LCDC_COMPOSER_LANDSCAPE_ONLY)),false)
++LOCAL_CFLAGS += -DLCDC_COMPOSER_FULL_ANGLE
++endif
++endif
++
++
+ LOCAL_CFLAGS += -fvisibility=hidden
+ 
+ LOCAL_SHARED_LIBRARIES := \
+diff --git a/services/surfaceflinger/DisplayDevice.cpp b/services/surfaceflinger/DisplayDevice.cpp
+index efdd8bd..64ef959 100755
+--- a/services/surfaceflinger/DisplayDevice.cpp
++++ b/services/surfaceflinger/DisplayDevice.cpp
+@@ -52,6 +52,7 @@ using namespace android;
+  * Initialize the display to the specified values.
+  *
+  */
++static PFNEGLRENDERBUFFERMODIFYEDANDROIDPROC _eglRenderBufferModifiedANDROID;
+ 
+ DisplayDevice::DisplayDevice(
+         const sp<SurfaceFlinger>& flinger,
+@@ -61,7 +62,8 @@ DisplayDevice::DisplayDevice(
+         const wp<IBinder>& displayToken,
+         const sp<DisplaySurface>& displaySurface,
+         const sp<IGraphicBufferProducer>& producer,
+-        EGLConfig config)
++        EGLConfig config,
++        int hardwareOrientation)
+     : mFlinger(flinger),
+       mType(type), mHwcDisplayId(hwcId),
+       mDisplayToken(displayToken),
+@@ -75,8 +77,8 @@ DisplayDevice::DisplayDevice(
+       mSecureLayerVisible(false),
+       mScreenAcquired(false),
+       mLayerStack(NO_LAYER_STACK),
+-      mHardwareOrientation(0),
+-      mOrientation()
++      mOrientation(),
++      mHardwareOrientation(hardwareOrientation)
+ {
+     mNativeWindow = new Surface(producer, false);
+ #ifndef BOARD_EGL_NEEDS_LEGACY_FB
+@@ -116,6 +118,15 @@ DisplayDevice::DisplayDevice(
+     mViewport.makeInvalid();
+     mFrame.makeInvalid();
+ 
++    if (mFlinger->orientationSwap()) {
++        mViewport.set(Rect(mDisplayHeight, mDisplayWidth));
++        mFrame.set(Rect(mDisplayHeight, mDisplayWidth));
++    } else {
++        mViewport.set(bounds());
++        mFrame.set(bounds());
++    }
++
++
+     // virtual displays are always considered enabled
+     mScreenAcquired = (mType >= DisplayDevice::DISPLAY_VIRTUAL);
+ 
+@@ -151,6 +162,8 @@ DisplayDevice::DisplayDevice(
+ #else
+     setProjection(DisplayState::eOrientationDefault, mViewport, mFrame);
+ #endif
++	_eglRenderBufferModifiedANDROID = (PFNEGLRENDERBUFFERMODIFYEDANDROIDPROC)
++                                    eglGetProcAddress("eglRenderBufferModifiedANDROID");
+ }
+ 
+ DisplayDevice::~DisplayDevice() {
+@@ -223,6 +236,12 @@ void DisplayDevice::flip(const Region& dirty) const
+     mPageFlipCount++;
+ }
+ 
++void DisplayDevice::hwcSwapBuffers() const
++{
++    _eglRenderBufferModifiedANDROID(mDisplay, mSurface);
++    eglSwapBuffers(mDisplay, mSurface);
++}
++
+ status_t DisplayDevice::beginFrame() const {
+     return mDisplaySurface->beginFrame();
+ }
+@@ -430,10 +449,16 @@ void DisplayDevice::setProjection(int orientation,
+     Rect viewport(newViewport);
+     Rect frame(newFrame);
+ 
++    if (mType == DisplayDevice::DISPLAY_PRIMARY) {
++        mClientOrientation = orientation;
++        orientation = (mHardwareOrientation +orientation) % 4;
++
++    }
++
+     const int w = mDisplayWidth;
+     const int h = mDisplayHeight;
+ 
+-    Transform R;
++    Transform R, realR;
+     DisplayDevice::orientationToTransfrom(orientation, w, h, &R);
+ 
+     if (!frame.isValid()) {
+@@ -484,6 +509,11 @@ void DisplayDevice::setProjection(int orientation,
+     // physical translation and finally rotate to the physical orientation.
+     mGlobalTransform = R * TP * S * TL;
+ 
++    if (DisplayDevice::orientationToTransfrom(
++            mClientOrientation, w, h, &realR) == NO_ERROR) {
++        mRealGlobalTransform = realR * TP * S * TL;
++    }
++
+     const uint8_t type = mGlobalTransform.getType();
+     mNeedsFiltering = (!mGlobalTransform.preserveRects() ||
+             (type >= Transform::SCALE));
+@@ -504,22 +534,27 @@ int DisplayDevice::getHardwareOrientation() {
+ 
+ void DisplayDevice::dump(String8& result) const {
+     const Transform& tr(mGlobalTransform);
++    const Transform& realTR(mRealGlobalTransform);
+     result.appendFormat(
+         "+ DisplayDevice: %s\n"
+-        "   type=%x, hwcId=%d, layerStack=%u, (%4dx%4d), ANativeWindow=%p, orient=%2d (type=%08x), "
++        "   type=%x, hwcId=%d, layerStack=%u, (%4dx%4d), ANativeWindow=%p, orient=%2d clienOrient=%2d (type=%08x), "
+         "flips=%u, isSecure=%d, secureVis=%d, acquired=%d, numLayers=%u\n"
+         "   v:[%d,%d,%d,%d], f:[%d,%d,%d,%d], s:[%d,%d,%d,%d],"
+-        "transform:[[%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f]]\n",
++        "transform:[[%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f]]\n"
++        "   real transform:[[%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f][%0.3f,%0.3f,%0.3f]]\n",
+         mDisplayName.string(), mType, mHwcDisplayId,
+         mLayerStack, mDisplayWidth, mDisplayHeight, mNativeWindow.get(),
+-        mOrientation, tr.getType(), getPageFlipCount(),
++        mOrientation, mClientOrientation, tr.getType(), getPageFlipCount(),
+         mIsSecure, mSecureLayerVisible, mScreenAcquired, mVisibleLayersSortedByZ.size(),
+         mViewport.left, mViewport.top, mViewport.right, mViewport.bottom,
+         mFrame.left, mFrame.top, mFrame.right, mFrame.bottom,
+         mScissor.left, mScissor.top, mScissor.right, mScissor.bottom,
+         tr[0][0], tr[1][0], tr[2][0],
+         tr[0][1], tr[1][1], tr[2][1],
+-        tr[0][2], tr[1][2], tr[2][2]);
++        tr[0][2], tr[1][2], tr[2][2],
++        realTR[0][0], realTR[1][0], realTR[2][0],
++        realTR[0][1], realTR[1][1], realTR[2][1],
++        realTR[0][2], realTR[1][2], realTR[2][2]);
+ 
+     String8 surfaceDump;
+     mDisplaySurface->dump(surfaceDump);
+diff --git a/services/surfaceflinger/DisplayDevice.h b/services/surfaceflinger/DisplayDevice.h
+index 24ca033..d5f83a0 100644
+--- a/services/surfaceflinger/DisplayDevice.h
++++ b/services/surfaceflinger/DisplayDevice.h
+@@ -79,7 +79,8 @@ public:
+             const wp<IBinder>& displayToken,
+             const sp<DisplaySurface>& displaySurface,
+             const sp<IGraphicBufferProducer>& producer,
+-            EGLConfig config);
++            EGLConfig config,
++            int hardwareOrientation);
+ 
+     ~DisplayDevice();
+ 
+@@ -110,9 +111,12 @@ public:
+     void                    setLayerStack(uint32_t stack);
+     void                    setProjection(int orientation, const Rect& viewport, const Rect& frame);
+ 
+-    int                     getOrientation() const { return mOrientation; }
++    int                     getOrientation() const { return mClientOrientation; }
++    int                     getHardwareRotation() const { return mOrientation; };
+     uint32_t                getOrientationTransform() const;
+     const Transform&        getTransform() const { return mGlobalTransform; }
++    const Transform&        getTransform(bool shouldTransform) const { return shouldTransform ? mGlobalTransform : mRealGlobalTransform; }
++    const Transform&        getRealTransform() const { return mRealGlobalTransform; }
+     const Rect              getViewport() const { return mViewport; }
+     const Rect              getFrame() const { return mFrame; }
+     const Rect&             getScissor() const { return mScissor; }
+@@ -127,6 +131,7 @@ public:
+     status_t prepareFrame(const HWComposer& hwc) const;
+ 
+     void swapBuffers(HWComposer& hwc) const;
++    void hwcSwapBuffers() const;
+     status_t compositionComplete() const;
+ 
+     // called after h/w composer has completed its set() call
+@@ -208,6 +213,7 @@ private:
+     uint32_t mLayerStack;
+     int mHardwareOrientation;
+     int mOrientation;
++    int mClientOrientation;
+     // user-provided visible area of the layer stack
+     Rect mViewport;
+     // user-provided rectangle where mViewport gets mapped to
+@@ -215,6 +221,8 @@ private:
+     // pre-computed scissor to apply to the display
+     Rect mScissor;
+     Transform mGlobalTransform;
++    Transform mRealGlobalTransform;
++    
+     bool mNeedsFiltering;
+ };
+ 
+diff --git a/services/surfaceflinger/DisplayHardware/FramebufferSurface.cpp b/services/surfaceflinger/DisplayHardware/FramebufferSurface.cpp
+index 09d9b64..b4e5269 100644
+--- a/services/surfaceflinger/DisplayHardware/FramebufferSurface.cpp
++++ b/services/surfaceflinger/DisplayHardware/FramebufferSurface.cpp
+@@ -37,7 +37,7 @@
+ #include "HWComposer.h"
+ 
+ #ifndef NUM_FRAMEBUFFER_SURFACE_BUFFERS
+-#define NUM_FRAMEBUFFER_SURFACE_BUFFERS (2)
++#define NUM_FRAMEBUFFER_SURFACE_BUFFERS (3)
+ #endif
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/services/surfaceflinger/DisplayHardware/HWComposer.cpp b/services/surfaceflinger/DisplayHardware/HWComposer.cpp
+index 07e9d9d..3c20f93 100644
+--- a/services/surfaceflinger/DisplayHardware/HWComposer.cpp
++++ b/services/surfaceflinger/DisplayHardware/HWComposer.cpp
+@@ -45,7 +45,7 @@
+ #include <cutils/properties.h>
+ 
+ #include "HWComposer.h"
+-
++#include <GLES/gl.h>
+ #include "../Layer.h"           // needed only for debugging
+ #include "../SurfaceFlinger.h"
+ 
+@@ -242,8 +242,8 @@ HWComposer::HWComposer(
+         // close FB HAL if we don't needed it.
+         // FIXME: this is temporary until we're not forced to open FB HAL
+         // before HWC.
+-        framebuffer_close(mFbDev);
+-        mFbDev = NULL;
++       // framebuffer_close(mFbDev);
++      //  mFbDev = NULL;
+     }
+ 
+     // If we have no HWC, or a pre-1.1 HWC, an FB dev is mandatory.
+@@ -765,6 +765,7 @@ status_t HWComposer::createWorkList(int32_t id, size_t numLayers) {
+ #endif
+             free(disp.list);
+             disp.list = (hwc_display_contents_1_t*)malloc(size);
++            memset(disp.list, 0, size);
+             disp.capacity = numLayers;
+         }
+         if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)) {
+@@ -776,6 +777,7 @@ status_t HWComposer::createWorkList(int32_t id, size_t numLayers) {
+             disp.framebufferTarget->flags = 0;
+             disp.framebufferTarget->handle = disp.fbTargetHandle;
+             disp.framebufferTarget->transform = 0;
++            disp.framebufferTarget->realtransform = mFlinger->getDefaultDisplayDevice()->getOrientationTransform();
+             disp.framebufferTarget->blending = HWC_BLENDING_PREMULT;
+             if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)) {
+                 disp.framebufferTarget->sourceCropf.left = 0;
+@@ -937,6 +939,7 @@ status_t HWComposer::prepare() {
+             DisplayData& disp(mDisplayData[0]);
+             disp.hasFbComp = false;
+             disp.hasOvComp = false;
++            disp.haslcdComp = false;
+             if (disp.list) {
+                 hwc_layer_list_t* list0 = reinterpret_cast<hwc_layer_list_t*>(disp.list);
+                 for (size_t i=0 ; i<hwcNumHwLayers(mHwc, disp.list) ; i++) {
+@@ -963,6 +966,12 @@ status_t HWComposer::prepare() {
+                     if (l.compositionType == HWC_OVERLAY) {
+                         disp.hasOvComp = true;
+                     }
++                    if ( (l.compositionType == HWC_TOWIN0 || l.compositionType == HWC_TOWIN1) )
++                    {
++                        if( mFlinger->mUseLcdcComposer)
++                            disp.hasOvComp = true;                       
++                        disp.haslcdComp = true;
++                    }
+                 }
+                 if (disp.list->numHwLayers == (disp.framebufferTarget ? 1 : 0)) {
+                     disp.hasFbComp = true;
+@@ -987,6 +996,11 @@ bool HWComposer::hasGlesComposition(int32_t id) const {
+     return mDisplayData[id].hasFbComp;
+ }
+ 
++bool HWComposer::hasLcdComposition(int32_t id) const {
++    if (uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id))
++        return false;
++    return mDisplayData[id].haslcdComp;
++}
+ sp<Fence> HWComposer::getAndResetReleaseFence(int32_t id) {
+     if (uint32_t(id)>31 || !mAllocatedDisplayIDs.hasBit(id))
+         return Fence::NO_FENCE;
+@@ -1003,6 +1017,28 @@ sp<Fence> HWComposer::getAndResetReleaseFence(int32_t id) {
+     return fd >= 0 ? new Fence(fd) : Fence::NO_FENCE;
+ }
+ 
++status_t HWComposer::setSkipFrame(  uint32_t skipflag ) {
++    int err = NO_ERROR;
++    if (mHwc) {             
++        for (size_t i=0 ; i<mNumDisplays ; i++) {
++            DisplayData& disp(mDisplayData[i]);         
++            if (disp.list) {      
++                disp.list->skipflag = skipflag;                   
++            }
++        }
++    }
++    return (status_t)err;
++}
++
++status_t HWComposer::layerRecover( ) 
++{
++    int err = NO_ERROR;
++    if (mHwc &&  mHwc->layer_recover ) {             
++        mHwc->layer_recover(mHwc, mNumDisplays, mLists);
++    }
++    return (status_t)err;
++}
++
+ status_t HWComposer::commit() {
+     int err = NO_ERROR;
+     if (mHwc) {
+@@ -1129,18 +1165,36 @@ bool HWComposer::supportsFramebufferTarget() const {
+ 
+ int HWComposer::fbPost(int32_t id,
+         const sp<Fence>& acquireFence, const sp<GraphicBuffer>& buffer) {
+-    if (mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)) {
+-        return setFramebufferTarget(id, acquireFence, buffer);
++
++    bool fbcmp = mFlinger->mUseLcdcComposer ? !hasGlesComposition(id):true;    
++
++    if (mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)
++        //#ifdef USE_LCDC_COMPOSER
++        && fbcmp
++        //#endif
++       ) {
++       return setFramebufferTarget(id, acquireFence, buffer);
+     } else {
+-        acquireFence->waitForever("HWComposer::fbPost");
+-        return mFbDev->post(mFbDev, buffer->handle);
++        DisplayData& disp(mDisplayData[id]);    
++        if (!mHwc || !disp.list->skipflag) 
++        {
++          if (acquireFence!=NULL)
++          {
++            acquireFence->waitForever("HWComposer::fbPost");
++          }
++            return mFbDev->post(mFbDev, buffer->handle);
++        }    
++        else
++            return NO_ERROR;
+     }
+ }
+ 
+ int HWComposer::fbCompositionComplete() {
+     if (mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1))
++    {
++        glFinish();
+         return NO_ERROR;
+-
++    }
+     if (mFbDev->compositionComplete) {
+         return mFbDev->compositionComplete(mFbDev);
+     } else {
+@@ -1410,13 +1464,29 @@ public:
+     virtual void setTransform(uint32_t transform) {
+         getLayer()->transform = transform;
+     }
++    virtual void setRealTransform(uint32_t realtransform) {
++        getLayer()->realtransform = realtransform;
++    }    
+     virtual void setFrame(const Rect& frame) {
+         getLayer()->displayFrame = reinterpret_cast<hwc_rect_t const&>(frame);
+     }
+     virtual void setCrop(const FloatRect& crop) {
+         if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_3)) {
++            #if 0
+             getLayer()->sourceCropf = reinterpret_cast<hwc_frect_t const&>(crop);
+-        } else {
++            hwc_rect_t& r = getLayer()->sourceCrop;
++            r.left  = int(ceilf(crop.left));
++            r.top   = int(ceilf(crop.top));
++            r.right = int(floorf(crop.right));
++            r.bottom= int(floorf(crop.bottom));
++            #else
++            hwc_rect_t& r = getLayer()->sourceCrop;
++            r.left  = int(ceilf(crop.left));
++            r.top   = int(ceilf(crop.top));
++            r.right = int(floorf(crop.right));
++            r.bottom= int(floorf(crop.bottom));   
++            #endif
++		} else {
+             /*
+              * Since h/w composer didn't support a flot crop rect before version 1.3,
+              * using integer coordinates instead produces a different output from the GL code in
+@@ -1460,6 +1530,15 @@ public:
+ 
+         getLayer()->acquireFenceFd = -1;
+     }
++
++    virtual void setLayername(const char *layername) {
++        int strlens ;
++        strlens = strlen(layername);
++       strlens = strlens > LayerNameLength ? LayerNameLength:strlens;
++       memcpy(getLayer()->LayerName,layername,strlens);
++       getLayer()->LayerName[strlens] = 0;
++    }
++    
+ };
+ 
+ /*
+@@ -1575,7 +1654,10 @@ void HWComposer::dump(String8& result) const {
+ #ifdef QCOM_HARDWARE
+                             "FB_BLIT",
+ #endif
+-                            "UNKNOWN"};
++                            "HWC_TOWIN0",
++                            "HWC_TOWIN1",
++                            "HWC_LCDC",
++                            "blit"};
+                     if (type >= NELEM(compositionTypeName))
+                         type = NELEM(compositionTypeName) - 1;
+ 
+diff --git a/services/surfaceflinger/DisplayHardware/HWComposer.h b/services/surfaceflinger/DisplayHardware/HWComposer.h
+index 4194629..ff67176 100644
+--- a/services/surfaceflinger/DisplayHardware/HWComposer.h
++++ b/services/surfaceflinger/DisplayHardware/HWComposer.h
+@@ -95,6 +95,8 @@ public:
+ 
+     // commits the list
+     status_t commit();
++    status_t layerRecover();
++    status_t setSkipFrame(  uint32_t skipflag ) ;
+ 
+     // release hardware resources and blank screen
+     status_t release(int disp);
+@@ -116,6 +118,7 @@ public:
+     // does this display have layers handled by GLES
+     bool hasGlesComposition(int32_t id) const;
+ 
++    bool hasLcdComposition(int32_t id) const;
+     // get the releaseFence file descriptor for a display's framebuffer layer.
+     // the release fence is only valid after commit()
+     sp<Fence> getAndResetReleaseFence(int32_t id);
+@@ -165,12 +168,14 @@ public:
+         virtual void setBlending(uint32_t blending) = 0;
+         virtual void setTransform(uint32_t transform) = 0;
+         virtual void setFrame(const Rect& frame) = 0;
++        virtual void setRealTransform(uint32_t realtransform) = 0;
+         virtual void setCrop(const FloatRect& crop) = 0;
+         virtual void setVisibleRegionScreen(const Region& reg) = 0;
+         virtual void setBuffer(const sp<GraphicBuffer>& buffer) = 0;
+         virtual void setAcquireFenceFd(int fenceFd) = 0;
+         virtual void setPlaneAlpha(uint8_t alpha) = 0;
+         virtual void onDisplayed() = 0;
++		virtual void setLayername( const char *layername) = 0;
+     };
+ 
+     /*
+@@ -321,6 +326,7 @@ private:
+         bool connected;
+         bool hasFbComp;
+         bool hasOvComp;
++        bool haslcdComp;
+         size_t capacity;
+         hwc_display_contents_1* list;
+         hwc_layer_1* framebufferTarget;
+diff --git a/services/surfaceflinger/DisplayHardware/VirtualDisplaySurface.cpp b/services/surfaceflinger/DisplayHardware/VirtualDisplaySurface.cpp
+index 7ff3a41..44a5260 100644
+--- a/services/surfaceflinger/DisplayHardware/VirtualDisplaySurface.cpp
++++ b/services/surfaceflinger/DisplayHardware/VirtualDisplaySurface.cpp
+@@ -80,7 +80,7 @@ VirtualDisplaySurface::VirtualDisplaySurface(HWComposer& hwc, int32_t dispId,
+     } else {
+         mDefaultOutputFormat = HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;
+     }
+-    mOutputFormat = mDefaultOutputFormat;
++    mOutputFormat = HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED;//mDefaultOutputFormat;
+ 
+     ConsumerBase::mName = String8::format("VDS: %s", mDisplayName.string());
+     mConsumer->setConsumerName(ConsumerBase::mName);
+diff --git a/services/surfaceflinger/Layer.cpp b/services/surfaceflinger/Layer.cpp
+index d6b428f..895b629 100644
+--- a/services/surfaceflinger/Layer.cpp
++++ b/services/surfaceflinger/Layer.cpp
+@@ -108,7 +108,8 @@ Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
+         mSecure(false),
+         mProtectedByApp(false),
+         mHasSurface(false),
+-        mClientRef(client)
++        mClientRef(client),
++        mDrawingScreenshot(false)
+ {
+     mCurrentCrop.makeInvalid();
+     mFlinger->getRenderEngine().genTextures(1, &mTextureName);
+@@ -140,6 +141,7 @@ Layer::Layer(SurfaceFlinger* flinger, const sp<Client>& client,
+     nsecs_t displayPeriod =
+             flinger->getHwComposer().getRefreshPeriod(HWC_DISPLAY_PRIMARY);
+     mFrameTracker.setDisplayRefreshPeriod(displayPeriod);
++	mLastRealtransform = 0;
+ }
+ 
+ void Layer::onFirstRef() {
+@@ -159,6 +161,17 @@ void Layer::onFirstRef() {
+ 
+     const sp<const DisplayDevice> hw(mFlinger->getDefaultDisplayDevice());
+     updateTransformHint(hw);
++    const State& s(getDrawingState());
++    const Transform bufferOrientation(mCurrentTransform);
++    uint32_t realtransform = (hw->getTransform(false) * s.transform * bufferOrientation).getOrientation();
++    if(mFlinger->mUseLcdcComposer )
++    {
++        if (mFlinger->mUseLcdcComposer && strcmp("com.android.systemui.ImageWallpaper", mName.string())) {
++            realtransform = (hw->getTransform(false)).getOrientation() | 0x08;
++            realtransform = (realtransform << 24) & GRALLOC_USAGE_ROT_MASK;
++            mSurfaceFlingerConsumer->setConsumerUsageBits(getEffectiveUsage(realtransform));
++        }
++    }    
+ }
+ 
+ Layer::~Layer() {
+@@ -185,6 +198,16 @@ void Layer::onLayerDisplayed(const sp<const DisplayDevice>& hw,
+ void Layer::onFrameAvailable() {
+     android_atomic_inc(&mQueuedFrames);
+     mFlinger->signalLayerUpdate();
++	if (mFlinger->mUseLcdcComposer && strcmp("com.android.systemui.ImageWallpaper", getName().string()))
++	{
++		const sp<const DisplayDevice> hw(mFlinger->getDefaultDisplayDevice());
++		uint32_t realtransform = (hw->getTransform(false)).getOrientation() | 0x08;
++	    if (mLastRealtransform!=realtransform) {
++	        mLastRealtransform = realtransform;
++	        realtransform = (realtransform << 24) & GRALLOC_USAGE_ROT_MASK;
++	        mSurfaceFlingerConsumer->setConsumerUsageBits(getEffectiveUsage(realtransform));
++		  } 
++	}
+ }
+ 
+ // called with SurfaceFlinger::mStateLock from the drawing thread after
+@@ -383,9 +406,9 @@ void Layer::setGeometry(
+     // this gives us only the "orientation" component of the transform
+     const State& s(getDrawingState());
+     if (!isOpaque() || s.alpha != 0xFF) {
+-        layer.setBlending(mPremultipliedAlpha ?
++        layer.setBlending( (mPremultipliedAlpha ?
+                 HWC_BLENDING_PREMULT :
+-                HWC_BLENDING_COVERAGE);
++                HWC_BLENDING_COVERAGE) |s.alpha<<16);
+     }
+ 
+     // apply the layer's transform, followed by the display's global transform
+@@ -445,7 +468,22 @@ void Layer::setGeometry(
+         // we can only handle simple transformation
+         layer.setSkip(true);
+     } else {
++        uint32_t realtransform = (hw->getTransform(false) * s.transform * bufferOrientation).getOrientation();
+         layer.setTransform(orientation);
++        if(mFlinger->mUseLcdcComposer )
++        {
++            layer.setRealTransform(tr.getOrientation());
++            if (mFlinger->mUseLcdcComposer && strcmp("com.android.systemui.ImageWallpaper", mName.string())) {
++                realtransform = (hw->getTransform(false)).getOrientation() | 0x08;
++                realtransform = (realtransform << 24) & GRALLOC_USAGE_ROT_MASK;
++                mSurfaceFlingerConsumer->setConsumerUsageBits(getEffectiveUsage(realtransform));
++            }
++            else
++            {
++                layer.setTransform(orientation); // Wallpaper force 0
++
++            }
++        }    
+     }
+ }
+ 
+@@ -463,6 +501,8 @@ void Layer::setPerFrameData(const sp<const DisplayDevice>& hw,
+     // NOTE: buffer can be NULL if the client never drew into this
+     // layer yet, or if we ran out of memory
+     layer.setBuffer(mActiveBuffer);
++
++    layer.setLayername(getName().string());
+ }
+ 
+ void Layer::setAcquireFence(const sp<const DisplayDevice>& hw,
+@@ -476,7 +516,8 @@ void Layer::setAcquireFence(const sp<const DisplayDevice>& hw,
+     if (layer.getCompositionType() == HWC_OVERLAY ||
+             layer.getCompositionType() == HWC_BLIT) {
+ #else
+-    if (layer.getCompositionType() == HWC_OVERLAY) {
++   // if (layer.getCompositionType() == HWC_OVERLAY || layer.getCompositionType()==100) {
++        if (layer.getCompositionType() != HWC_FRAMEBUFFER) {   
+ #endif
+         sp<Fence> fence = mSurfaceFlingerConsumer->getCurrentFence();
+         if (fence->isValid()) {
+@@ -700,9 +741,14 @@ bool Layer::getOpacityForFormat(uint32_t format) {
+ void Layer::computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh) const
+ {
+     const Layer::State& s(getDrawingState());
+-    const Transform tr(hw->getTransform() * s.transform);
++    Transform tr(hw->getTransform() * s.transform);
++
+     const uint32_t hw_h = hw->getHeight();
+     Rect win(s.active.w, s.active.h);
++    if (mDrawingScreenshot) {
++        computeHWGeometry(tr, s.transform, hw);
++    }
++
+     if (!s.active.crop.isEmpty()) {
+         win.intersect(s.active.crop, &win);
+     }
+@@ -719,6 +765,52 @@ void Layer::computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh) const
+     }
+ }
+ 
++void Layer::computeHWGeometry(Transform& tr, const Transform& layerTransform, const sp<const DisplayDevice>& hw) const
++{
++    int hwrotation = mFlinger->getHardwareOrientation();
++    int hw_offset = hw->getWidth() - hw->getHeight();
++
++    if (hwrotation == DisplayState::eOrientation90) {
++        // 90 degree
++        tr = hw->getTransform(false) * layerTransform;
++        switch (hw->getHardwareRotation()){
++        case 0:
++            tr.set(tr.tx(), tr.ty());
++            break;
++        case 1:
++            tr.set(tr.tx(), tr.ty()-hw_offset);
++            break;
++        case 2:
++            tr.set(tr.tx()-hw_offset, tr.ty()-hw_offset);
++            break;
++        case 3:
++            tr.set(tr.tx()-hw_offset, tr.ty());
++            break;
++        }
++    } else if (hwrotation == DisplayState::eOrientation180) {
++        // 180 degree
++        tr = hw->getTransform(false) * layerTransform;
++        tr.set(tr.tx(), tr.ty());
++    } else if (hwrotation == DisplayState::eOrientation270) {
++        // 270 degree
++        tr = hw->getTransform(false) * layerTransform;
++        switch (hw->getHardwareRotation()){
++        case 0:
++            tr.set(tr.tx()-hw_offset, tr.ty()-hw_offset);
++            break;
++        case 1:
++            tr.set(tr.tx()-hw_offset, tr.ty());
++            break;
++        case 2:
++            tr.set(tr.tx(), tr.ty());
++            break;
++        case 3:
++            tr.set(tr.tx(), tr.ty()-hw_offset);
++            break;
++        }
++    }
++}
++
+ bool Layer::isOpaque() const
+ {
+     // if we don't have a buffer yet, we're translucent regardless of the
+@@ -1232,6 +1324,12 @@ void Layer::updateTransformHint(const sp<const DisplayDevice>& hw) const {
+ // debugging
+ // ----------------------------------------------------------------------------
+ 
++void Layer::ReleaseOldBuffer()
++{
++    if (mFlinger->mUseLcdcComposer) {
++        mSurfaceFlingerConsumer->ReleaseOldBuffer();
++    }
++}
+ void Layer::dump(String8& result, Colorizer& colorizer) const
+ {
+     const Layer::State& s(getDrawingState());
+diff --git a/services/surfaceflinger/Layer.h b/services/surfaceflinger/Layer.h
+index b6ff039..c82ecbd 100644
+--- a/services/surfaceflinger/Layer.h
++++ b/services/surfaceflinger/Layer.h
+@@ -132,10 +132,13 @@ public:
+     bool setCrop(const Rect& crop);
+     bool setLayerStack(uint32_t layerStack);
+ 
++    void setDrawingScreenshot(bool drawScreenshot) { mDrawingScreenshot = drawScreenshot; };
++
+     uint32_t getTransactionFlags(uint32_t flags);
+     uint32_t setTransactionFlags(uint32_t flags);
+ 
+     void computeGeometry(const sp<const DisplayDevice>& hw, Mesh& mesh) const;
++    void computeHWGeometry(Transform& tr, const Transform& layerTransform, const sp<const DisplayDevice>& hw) const;
+     Rect computeBounds() const;
+ 
+     sp<IBinder> getHandle();
+@@ -151,6 +154,7 @@ public:
+      * isOpaque - true if this surface is opaque
+      */
+     virtual bool isOpaque() const;
++    virtual void ReleaseOldBuffer();    //rk : for lcdc composer
+ 
+     /*
+      * isSecure - true if this surface is secure, that is if it prevents
+@@ -364,6 +368,9 @@ private:
+     bool mFiltering;
+     // Whether filtering is needed b/c of the drawingstate
+     bool mNeedsFiltering;
++
++    bool mDrawingScreenshot;
++    uint32_t    mLastRealtransform;
+     // The mesh used to draw the layer in GLES composition mode
+     mutable Mesh mMesh;
+     // The mesh used to draw the layer in GLES composition mode
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index 9d6c199..e1e0516 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -159,7 +159,9 @@ SurfaceFlinger::SurfaceFlinger()
+         mBootFinished(false),
+         mPrimaryHWVsyncEnabled(false),
+         mHWVsyncAvailable(false),
+-        mDaltonize(false)
++        mDaltonize(false),
++        mHardwareOrientation(0),
++        mUseLcdcComposer(0)
+ {
+     ALOGI("SurfaceFlinger is starting");
+ 
+@@ -180,8 +182,17 @@ SurfaceFlinger::SurfaceFlinger()
+             mDebugDDMS = 0;
+         }
+     }
++    property_get("debug.sf.fps", value, "0");
++    mDebugFPS = atoi(value);
++    
+     ALOGI_IF(mDebugRegion, "showupdates enabled");
+     ALOGI_IF(mDebugDDMS, "DDMS debugging enabled");
++
++    // hardware rotation
++    property_get("ro.sf.hwrotation", value, "0");
++    mHardwareOrientation = atoi(value) / 90;
++    property_get("ro.sf.lcdc_composer", value, "0");
++    mUseLcdcComposer = atoi(value);
+ }
+ 
+ void SurfaceFlinger::onFirstRef()
+@@ -591,7 +602,8 @@ void SurfaceFlinger::init() {
+             sp<DisplayDevice> hw = new DisplayDevice(this,
+                     type, allocateHwcDisplayId(type), isSecure, token,
+                     fbs, bq,
+-                    mEGLConfig);
++                    mEGLConfig,
++                    mHardwareOrientation);
+             if (i > DisplayDevice::DISPLAY_PRIMARY) {
+                 // FIXME: currently we don't get blank/unblank requests
+                 // for displays other than the main display, so we always
+@@ -634,6 +646,10 @@ void SurfaceFlinger::init() {
+     // set initial conditions (e.g. unblank default device)
+     initializeDisplays();
+ 
++    char value[PROPERTY_VALUE_MAX];
++    memset(value,0,PROPERTY_VALUE_MAX);
++    property_get("sys.enable.wfd.optimize", value, "0");
++    mWfdOptimize = atoi(value);
+     // start boot animation
+     startBootAnim();
+ }
+@@ -660,6 +676,24 @@ size_t SurfaceFlinger::getMaxViewportDims() const {
+ 
+ // ----------------------------------------------------------------------------
+ 
++void SurfaceFlinger::debugShowFPS() const
++{
++    static int mFrameCount;
++    static int mLastFrameCount = 0;
++    static nsecs_t mLastFpsTime = 0;
++    static float mFps = 0;
++    mFrameCount++;
++    nsecs_t now = systemTime();
++    nsecs_t diff = now - mLastFpsTime;
++    if (diff > ms2ns(500)) {
++        mFps =  ((mFrameCount - mLastFrameCount) * float(s2ns(1))) / diff;
++        mLastFpsTime = now;
++        mLastFrameCount = mFrameCount;
++        ALOGD("mFps = %2.3f", mFps);
++    }
++    // XXX: mFPS has the value we want
++ }
++
+ bool SurfaceFlinger::authenticateSurfaceTexture(
+         const sp<IGraphicBufferProducer>& bufferProducer) const {
+     Mutex::Autolock _l(mStateLock);
+@@ -684,6 +718,8 @@ status_t SurfaceFlinger::getDisplayInfo(const sp<IBinder>& display, DisplayInfo*
+     float xdpi = hwc.getDpiX(type);
+     float ydpi = hwc.getDpiY(type);
+ 
++    info->w = hwc.getWidth(type);
++    info->h = hwc.getHeight(type);
+     // TODO: Not sure if display density should handled by SF any longer
+     class Density {
+         static int getDensityFromProperty(char const* propName) {
+@@ -698,10 +734,20 @@ status_t SurfaceFlinger::getDisplayInfo(const sp<IBinder>& display, DisplayInfo*
+         static int getEmuDensity() {
+             return getDensityFromProperty("qemu.sf.lcd_density"); }
+         static int getBuildDensity()  {
++             int density = getDensityFromProperty("persist.sys.lcd_density");
++             if (density) {
++                return density;
++             }
+             return getDensityFromProperty("ro.sf.lcd_density"); }
+     };
+ 
+     if (type == DisplayDevice::DISPLAY_PRIMARY) {
++        if (orientationSwap()) {
++            xdpi = hwc.getDpiY(type);
++            ydpi = hwc.getDpiX(type);
++            info->w = hwc.getHeight(type);
++            info->h = hwc.getWidth(type);
++        }
+         // The density of the device is provided by a build property
+         float density = Density::getBuildDensity() / 160.0f;
+         if (density == 0) {
+@@ -729,14 +775,10 @@ status_t SurfaceFlinger::getDisplayInfo(const sp<IBinder>& display, DisplayInfo*
+ 
+     int additionalRot = mDisplays[0]->getHardwareOrientation() / 90;
+     if ((type == DisplayDevice::DISPLAY_PRIMARY) && (additionalRot & DisplayState::eOrientationSwapMask)) {
+-        info->h = hwc.getWidth(type);
+-        info->w = hwc.getHeight(type);
+         info->xdpi = ydpi;
+         info->ydpi = xdpi;
+     }
+     else {
+-        info->w = hwc.getWidth(type);
+-        info->h = hwc.getHeight(type);
+         info->xdpi = xdpi;
+         info->ydpi = ydpi;
+     }
+@@ -1187,6 +1229,18 @@ void SurfaceFlinger::setUpHWComposer() {
+         status_t err = hwc.prepare();
+         ALOGE_IF(err, "HWComposer::prepare failed (%s)", strerror(-err));
+ 
++        if (mUseLcdcComposer) {
++            for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
++                sp<const DisplayDevice> hw(mDisplays[dpy]);
++                const int32_t id = hw->getHwcDisplayId();
++                if (id >= 0) {
++                    const bool hasHwcComposition = hwc.hasHwcComposition(id);
++                    if(!hasHwcComposition) {
++                        ReleaseOldBuffer();
++                    }
++                }
++            }
++        }
+         for (size_t dpy=0 ; dpy<mDisplays.size() ; dpy++) {
+             sp<const DisplayDevice> hw(mDisplays[dpy]);
+             hw->prepareFrame(hwc);
+@@ -1222,7 +1276,7 @@ void SurfaceFlinger::postFramebuffer()
+ 
+     const nsecs_t now = systemTime();
+     mDebugInSwapBuffers = now;
+-
++    int r = 0;
+     HWComposer& hwc(getHwComposer());
+     if (hwc.initCheck() == NO_ERROR) {
+         if (!hwc.supportsFramebufferTarget()) {
+@@ -1230,8 +1284,17 @@ void SurfaceFlinger::postFramebuffer()
+             //   "surface must be bound to the calling thread's current context,
+             //    for the current rendering API."
+             getDefaultDisplayDevice()->makeCurrent(mEGLDisplay, mEGLContext);
+-        }
+-        hwc.commit();
++        }      
++        hwc.setSkipFrame(mcapFlag);        
++        r = hwc.commit();
++        mcapFlag = 0;
++    }
++
++    if (mDebugFPS > 0) {
++        debugShowFPS();
++    }
++    if (mUseLcdcComposer) {
++        ReleaseOldBuffer();
+     }
+ 
+     // make the default display current because the VirtualDisplayDevice code cannot
+@@ -1363,6 +1426,10 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
+             for (size_t i=0 ; i<dc ; i++) {
+                 const ssize_t j = curr.indexOfKey(draw.keyAt(i));
+                 if (j < 0) {
++                    if (draw[i].type == HWC_DISPLAY_VIRTUAL)
++                    {
++                      property_set("sys.hwc.compose_policy", "6");
++                    }
+                     // in drawing state but not in current state
+                     if (!draw[i].isMainDisplay()) {
+                         // Call makeCurrent() on the primary display so we can
+@@ -1440,6 +1507,7 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
+                         // Virtual displays without a surface are dormant:
+                         // they have external state (layer stack, projection,
+                         // etc.) but no internal state (i.e. a DisplayDevice).
++                        property_set("sys.hwc.compose_policy", "0");
+                         if (state.surface != NULL) {
+ 
+ #ifdef QCOM_HARDWARE
+@@ -1492,7 +1560,8 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags)
+                     if (dispSurface != NULL && producer != NULL) {
+                         sp<DisplayDevice> hw = new DisplayDevice(this,
+                                 state.type, hwcDisplayId, state.isSecure,
+-                                display, dispSurface, producer, mEGLConfig);
++                                display, dispSurface, producer, mEGLConfig,
++                                mHardwareOrientation);
+                         hw->setLayerStack(state.layerStack);
+                         hw->setProjection(state.orientation,
+                                 state.viewport, state.frame);
+@@ -1976,6 +2045,12 @@ void SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const
+      */
+ 
+     const Vector< sp<Layer> >& layers(hw->getVisibleLayersSortedByZ());
++    bool wfdOptimize = mWfdOptimize && (hw->getDisplayType()==DisplayDevice::DISPLAY_VIRTUAL) && (mUseLcdcComposer==false);
++    if (wfdOptimize)
++    {
++      engine.clearWithColor(0, 0, 0, 0);
++    }
++
+     const size_t count = layers.size();
+     const Transform& tr = hw->getTransform();
+     if (cur != end) {
+@@ -1998,7 +2073,10 @@ void SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const
+                         break;
+                     }
+                     case HWC_FRAMEBUFFER: {
+-                        layer->draw(hw, clip);
++                        if (!wfdOptimize)
++			{
++			   layer->draw(hw, clip);
++			}
+                         break;
+                     }
+ #ifdef QCOM_HARDWARE
+@@ -2006,6 +2084,19 @@ void SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const
+                         //Do nothing
+                         break;
+ #endif
++		 case HWC_BLITTER:  {
++		    if(count==4
++		        && !strcmp(layers[0]->getName(),"SurfaceView")
++		        && !strcmp(layers[1]->getName(),"com.android.launcher3/com.android.launcher3.WallpaperPickerActivity")
++		        && strstr(layers[2]->getName(),"com.android.")
++		        && !strcmp(layers[3]->getName(),"NavigationBar"))
++		        {
++		              mcapFlag = 1;
++		             ALOGW("skip error frame");
++		             return;
++		        }
++		    break;
++		}
+                     case HWC_FRAMEBUFFER_TARGET: {
+                         // this should not happen as the iterator shouldn't
+                         // let us get there.
+@@ -2023,7 +2114,10 @@ void SurfaceFlinger::doComposeSurfaces(const sp<const DisplayDevice>& hw, const
+             const Region clip(dirty.intersect(
+                     tr.transform(layer->visibleRegion)));
+             if (!clip.isEmpty()) {
+-                layer->draw(hw, clip);
++                if (!wfdOptimize)
++                {
++                  layer->draw(hw, clip);
++                }
+             }
+         }
+     }
+@@ -2815,6 +2909,18 @@ SurfaceFlinger::getLayerSortedByZForHwcDisplay(int id) {
+     return getDisplayDevice(dpy)->getVisibleLayersSortedByZ();
+ }
+ 
++bool SurfaceFlinger::ReleaseOldBuffer(void)
++{
++    if (mUseLcdcComposer) {
++        const LayerVector& currentLayers(mDrawingState.layersSortedByZ);
++        size_t count = currentLayers.size();
++        for (size_t i=0 ; i<count ; i++) {
++            const sp<Layer>& layer(currentLayers[i]);      
++            layer->ReleaseOldBuffer();
++        }
++    }
++    return true;          
++}
+ bool SurfaceFlinger::startDdmConnection()
+ {
+     void* libddmconnection_dso =
+@@ -3160,10 +3266,23 @@ void SurfaceFlinger::renderScreenImplLocked(
+     RenderEngine& engine(getRenderEngine());
+ 
+     // get screen geometry
+-    const uint32_t hw_w = hw->getWidth();
+-    const uint32_t hw_h = hw->getHeight();
+-    const bool filtering = reqWidth != hw_w || reqWidth != hw_h;
++    uint32_t hw_w = hw->getWidth();
++    uint32_t hw_h = hw->getHeight();
++
++    HWComposer& hwc(getHwComposer());
++    if(mUseLcdcComposer)
++    {
++        if (hwc.initCheck() == NO_ERROR) {         
++            hwc.layerRecover();
++        }
++    }    
++    if (orientationSwap()) {
++        hw_w = hw->getHeight();
++        hw_h = hw->getWidth();
++    }
++
+ 
++    const bool filtering = reqWidth != hw_w || reqHeight != hw_h;  // fix google bug hds
+     // make sure to clear all GL error flags
+     engine.checkErrors();
+ 
+@@ -3199,7 +3318,9 @@ void SurfaceFlinger::renderScreenImplLocked(
+                 if (layer->isVisible()) {
+ #endif
+                     if (filtering) layer->setFiltering(true);
++                    layer->setDrawingScreenshot(true);
+                     layer->draw(hw);
++                    layer->setDrawingScreenshot(false);
+                     if (filtering) layer->setFiltering(false);
+                 }
+             }
+@@ -3209,6 +3330,9 @@ void SurfaceFlinger::renderScreenImplLocked(
+     // compositionComplete is needed for older driver
+     hw->compositionComplete();
+     hw->setViewportAndProjection();
++    mcapFlag = 1;
++    
++    
+ }
+ 
+ 
+@@ -3230,14 +3354,30 @@ status_t SurfaceFlinger::captureScreenImplLocked(
+     const uint32_t hw_w = hw->getWidth();
+     const uint32_t hw_h = hw->getHeight();
+ 
+-    if ((reqWidth > hw_w) || (reqHeight > hw_h)) {
+-        ALOGE("size mismatch (%d, %d) > (%d, %d)",
+-                reqWidth, reqHeight, hw_w, hw_h);
+-        return BAD_VALUE;
+-    }
++    if (orientationSwap()) {
++        if (reqWidth == 0 && reqHeight == 0) {
++            reqWidth = hw_h;
++            reqHeight = hw_w;
++        } else {
++            if ((reqWidth > hw_h) || (reqHeight > hw_w)) {
++                ALOGE("size mismatch (%d, %d) > (%d, %d)",
++                        reqWidth, reqHeight, hw_w, hw_h);
++                return BAD_VALUE;
++            }
+ 
+-    reqWidth  = (!reqWidth)  ? hw_w : reqWidth;
+-    reqHeight = (!reqHeight) ? hw_h : reqHeight;
++            reqWidth  = (!reqWidth)  ? hw_h : reqWidth;
++            reqHeight = (!reqHeight) ? hw_w : reqHeight;
++        }
++    } else {
++        if ((reqWidth > hw_w) || (reqHeight > hw_h)) {
++            ALOGE("size mismatch (%d, %d) > (%d, %d)",
++                        reqWidth, reqHeight, hw_w, hw_h);
++            return BAD_VALUE;
++        }
++
++        reqWidth  = (!reqWidth)  ? hw_w : reqWidth;
++        reqHeight = (!reqHeight) ? hw_h : reqHeight;
++    }
+ 
+     // create a surface (because we're a producer, and we need to
+     // dequeue/queue a buffer)
+diff --git a/services/surfaceflinger/SurfaceFlinger.h b/services/surfaceflinger/SurfaceFlinger.h
+index 40a2401..bbedc54 100644
+--- a/services/surfaceflinger/SurfaceFlinger.h
++++ b/services/surfaceflinger/SurfaceFlinger.h
+@@ -78,6 +78,18 @@ enum {
+     eTransactionMask          = 0x07
+ };
+ 
++enum
++{
++    /* NOTE: These enums are unknown to Android.
++     * Android only checks against HWC_FRAMEBUFFER.
++     * This layer is to be drawn into the framebuffer by hwc blitter */
++    //HWC_TOWIN0 = 0x10,
++    //HWC_TOWIN1,
++    HWC_BLITTER = 100,
++    HWC_DIM,
++    HWC_CLEAR_HOLE
++};
++
+ class SurfaceFlinger : public BnSurfaceComposer,
+                        private IBinder::DeathRecipient,
+                        private HWComposer::EventHandler
+@@ -125,6 +137,7 @@ public:
+     // is received
+     // TODO: this should be made accessible only to MessageQueue
+     void onMessageReceived(int32_t what);
++    void debugShowFPS() const;
+ 
+     // for debugging only
+     // TODO: this should be made accessible only to HWComposer
+@@ -139,6 +152,16 @@ public:
+     static bool sExtendedMode;
+     static bool isExtendedMode() { return sExtendedMode; };
+ #endif
++
++    // ro.sf.hwrotation
++    int mHardwareOrientation;
++    int mUseLcdcComposer;
++	Mutex  mCaptureScreenLock;
++    // Get hardware orientation
++    int getHardwareOrientation() const { return mHardwareOrientation; }
++    bool orientationSwap() const { return mHardwareOrientation % 2; }
++    bool ReleaseOldBuffer(void);    //rk : for lcdc composer
++
+ private:
+     friend class Client;
+     friend class DisplayEventConnection;
+@@ -487,7 +510,7 @@ private:
+     volatile nsecs_t mDebugInTransaction;
+     nsecs_t mLastTransactionTime;
+     bool mBootFinished;
+-
++    int mWfdOptimize;
+     // these are thread safe
+     mutable MessageQueue mEventQueue;
+     FrameTracker mAnimFrameTracker;
+@@ -508,6 +531,9 @@ private:
+ 
+     Daltonizer mDaltonizer;
+     bool mDaltonize;
++    int mDebugFPS;
++    int mcapFlag;
++
+ };
+ 
+ }; // namespace android
+-- 
+1.9.1
+

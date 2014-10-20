@@ -1,0 +1,118 @@
+From 3fd7be742d7d7be11e7c59ed4fef45aa15dbe7a5 Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Sun, 17 Aug 2014 20:46:00 +0200
+Subject: [PATCH 2/2] add defs for hwcomposer.rk30board
+
+Change-Id: Ibeece4b249469a2e1887b440fccd9ccce7e5f5c5
+---
+ include/hardware/gralloc.h         |  2 +-
+ include/hardware/hardware.h        |  1 +
+ include/hardware/hwcomposer.h      | 23 +++++++++++++++++++++++
+ include/hardware/hwcomposer_defs.h | 11 +++++++++++
+ 4 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/include/hardware/gralloc.h b/include/hardware/gralloc.h
+index b27d83c..30501fb 100644
+--- a/include/hardware/gralloc.h
++++ b/include/hardware/gralloc.h
+@@ -119,7 +119,7 @@ enum {
+      * composition to the external sink.
+      */
+     GRALLOC_USAGE_PROTECTED             = 0x00004000,
+-
++    GRALLOC_USAGE_ROT_MASK              = 0x0F000000,
+     /* implementation-specific private usage flags */
+     GRALLOC_USAGE_PRIVATE_0             = 0x10000000,
+     GRALLOC_USAGE_PRIVATE_1             = 0x20000000,
+diff --git a/include/hardware/hardware.h b/include/hardware/hardware.h
+index 416ae39..3250261 100644
+--- a/include/hardware/hardware.h
++++ b/include/hardware/hardware.h
+@@ -25,6 +25,7 @@
+ 
+ __BEGIN_DECLS
+ 
++#define RK_FBIOSET_CONFIG_DONE         0x4628
+ /*
+  * Value for the hw_module_t.tag field
+  */
+diff --git a/include/hardware/hwcomposer.h b/include/hardware/hwcomposer.h
+index 061c21d..450a224 100644
+--- a/include/hardware/hwcomposer.h
++++ b/include/hardware/hwcomposer.h
+@@ -191,6 +191,19 @@ typedef struct hwc_layer_1 {
+              * The visible region INCLUDES areas overlapped by a translucent layer.
+              */
+             hwc_region_t visibleRegionScreen;
++    		char LayerName[LayerNameLength + 1];
++			int32_t bufferCount;
++            int32_t bufferUpdate;
++            int32_t bufferChange;
++            int32_t dospecialflag;
++            int32_t exTop;
++            int32_t exBottom;
++            int32_t exLeft;
++            int32_t exRight;
++            int32_t exAddrOffset;
++			uint32_t realtransform;
++			uint32_t direct_addr;
++
+ 
+             /* Sync fence object that will be signaled when the buffer's
+              * contents are available. May be -1 if the contents are already
+@@ -377,6 +390,7 @@ typedef struct hwc_display_contents_1 {
+      * performed by SurfaceFlinger.
+      */
+     uint32_t flags;
++    uint32_t skipflag;
+     size_t numHwLayers;
+     hwc_layer_1_t hwLayers[0];
+ 
+@@ -534,6 +548,15 @@ typedef struct hwc_composer_device_1 {
+     int (*set)(struct hwc_composer_device_1 *dev,
+                 size_t numDisplays, hwc_display_contents_1_t** displays);
+ 
++	int (*fbPost2)(struct hwc_composer_device_1 *dev,size_t numDisplays, hwc_display_contents_1_t** displays);
++	int (*fbPost3)(struct hwc_composer_device_1 *dev,size_t numDisplays, hwc_display_contents_1_t** displays,buffer_handle_t buffer);
++    int (*layer_recover)(struct hwc_composer_device_1 *dev,
++                    size_t numDisplays, hwc_display_contents_1_t** displays);
++
++	int (*rkCopybit)(struct hwc_composer_device_1 *dev, hwc_layer_1_t *src_layer, 
++		             hwc_layer_1_t *dst_layer, int flag);
++
++    //int (*onHwcComposerComplete)(struct hwc_composer_device_1 *dev);
+     /*
+      * eventControl(..., event, enabled)
+      * Enables or disables h/w composer events for a display.
+diff --git a/include/hardware/hwcomposer_defs.h b/include/hardware/hwcomposer_defs.h
+index 35c7820..d93f44f 100644
+--- a/include/hardware/hwcomposer_defs.h
++++ b/include/hardware/hwcomposer_defs.h
+@@ -40,6 +40,12 @@ __BEGIN_DECLS
+ #define HWC_DEVICE_API_VERSION_1_2  HARDWARE_DEVICE_API_VERSION_2(1, 2, HWC_HEADER_VERSION)
+ #define HWC_DEVICE_API_VERSION_1_3  HARDWARE_DEVICE_API_VERSION_2(1, 3, HWC_HEADER_VERSION)
+ 
++#define HWC_BLENDING_DIM		0x0805
++#define HWC_BLENDING_CLEAR_HOLE          0x0806
++
++#define HWC_Layer_DEBUG
++#define LayerNameLength 60
++
+ enum {
+     /* hwc_composer_device_t::set failed in EGL */
+     HWC_EGL_ERROR = -1
+@@ -99,6 +105,11 @@ enum {
+     /* this layer holds the result of compositing the HWC_FRAMEBUFFER layers.
+      * Added in HWC_DEVICE_API_VERSION_1_1. */
+     HWC_FRAMEBUFFER_TARGET = 3,
++    HWC_TOWIN0,
++    HWC_TOWIN1,
++    HWC_TOWIN2,
++    HWC_TOWIN3,
++    HWC_LCDC,
+ 
+ #ifdef QCOM_HARDWARE
+     /* this layer will be handled in the HWC, using a blit engine */
+-- 
+1.9.1
+

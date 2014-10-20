@@ -1,0 +1,59 @@
+From d8c5106c820ba4b4acfaf114a269d610766a8a95 Mon Sep 17 00:00:00 2001
+From: netlars <netlars@gmx.de>
+Date: Mon, 7 Jul 2014 19:40:45 +0200
+Subject: [PATCH] RadioButton
+
+Change-Id: Ief10030156800b85ff1215af221da8c9718d9f82
+---
+ src/com/android/bluetooth/btservice/AdapterService.java | 12 ++++++++++++
+ src/com/android/bluetooth/btservice/AdapterState.java   |  4 ++--
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/src/com/android/bluetooth/btservice/AdapterService.java b/src/com/android/bluetooth/btservice/AdapterService.java
+index bd419b3..6f23194 100755
+--- a/src/com/android/bluetooth/btservice/AdapterService.java
++++ b/src/com/android/bluetooth/btservice/AdapterService.java
+@@ -503,6 +503,10 @@ public class AdapterService extends Service {
+             return service.isEnabled();
+         }
+ 
++        public boolean isRadioEnabled() {
++            return false;
++        }
++
+         public int getState() {
+             // don't check caller, may be called from system UI
+             AdapterService service = getService();
+@@ -546,6 +550,14 @@ public class AdapterService extends Service {
+             return service.disable();
+         }
+ 
++        public boolean enableRadio() {
++            return false;
++        }
++
++        public boolean disableRadio() {
++            return false;
++        }
++
+         public String getAddress() {
+             if ((Binder.getCallingUid() != Process.SYSTEM_UID) &&
+                 (!Utils.checkCaller())) {
+diff --git a/src/com/android/bluetooth/btservice/AdapterState.java b/src/com/android/bluetooth/btservice/AdapterState.java
+index 5f9c30b..637d99a 100755
+--- a/src/com/android/bluetooth/btservice/AdapterState.java
++++ b/src/com/android/bluetooth/btservice/AdapterState.java
+@@ -60,8 +60,8 @@ final class AdapterState extends StateMachine {
+     static final int USER_TURN_OFF_DELAY_MS=500;
+ 
+     //TODO: tune me
+-    private static final int ENABLE_TIMEOUT_DELAY = 8000;
+-    private static final int DISABLE_TIMEOUT_DELAY = 8000;
++    private static final int ENABLE_TIMEOUT_DELAY = 20000;
++    private static final int DISABLE_TIMEOUT_DELAY = 20000;
+     private static final int START_TIMEOUT_DELAY = 5000;
+     private static final int STOP_TIMEOUT_DELAY = 5000;
+     private static final int PROPERTY_OP_DELAY =2000;
+-- 
+1.9.1
+
