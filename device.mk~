@@ -61,6 +61,10 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
 	$(call find-copy-subdir-files,*,device/rockchip/rk31board/prebuilt/lib/modules,system/lib/modules)
 
+# Copy media
+PRODUCT_COPY_FILES += \
+	$(call find-copy-subdir-files,*,device/rockchip/rk31board/prebuilt/media,system/media)
+
 # Copy keylayouts
 PRODUCT_COPY_FILES += \
 	$(call find-copy-subdir-files,*,device/rockchip/rk31board/prebuilt/usr/keylayout,system/usr/keylayout)
