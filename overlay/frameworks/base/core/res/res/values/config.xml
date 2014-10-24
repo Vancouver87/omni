@@ -23,11 +23,11 @@
     <!-- Default color for notification LED is white. -->
     <color name="config_defaultNotificationColor">#ffffffff</color>
 
-    <!-- This device is not "voice capable"; it's data-only. -->
-    <bool name="config_voice_capable">false</bool>
+    <!-- This device is "voice capable", not data-only. -->
+    <bool name="config_voice_capable">true</bool>
 
-    <!-- This device does not allow sms service. -->
-    <bool name="config_sms_capable">false</bool>
+    <!-- This device does allow sms service. -->
+    <bool name="config_sms_capable">true</bool>
 
     <!-- This string array should be overridden by the device to present a list of network
          attributes.  This is used by the connectivity manager to decide which networks can coexist

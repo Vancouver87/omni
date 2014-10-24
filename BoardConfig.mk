@@ -101,7 +101,7 @@ TARGET_USE_CUSTOM_LUN_FILE_PATH := "/sys/devices/platform/mt_usb/gadget/lun%d/fi
 BOARD_UMS_LUNFILE := "/sys/class/android_usb/android0/f_mass_storage/lun/file"
 BOARD_UMS_2ND_LUNFILE := "/sys/class/android_usb/android0/f_mass_storage/lun1/file"
 BOARD_USE_CUSTOM_RECOVERY_FONT:= \"roboto_15x24.h\"
-DEVICE_RESOLUTION := 1024x600
+DEVICE_RESOLUTION := 1920x1200
 TARGET_RECOVERY_PIXEL_FORMAT := "RGB_565"
 #TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
 #TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
@@ -132,3 +132,7 @@ TW_INCLUDE_FB2PNG := true
 #TWRP_EVENT_LOGGING := true
 #BOARD_HAS_NO_REAL_SDCARD := true
 #TW_IGNORE_MAJOR_AXIS_0 := true
+
+BLUETOOTH_USE_BPLUS := true
+BOARD_CODEC_RT5631 := true
+BOARD_BP_AUTO := true

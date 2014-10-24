@@ -15,6 +15,9 @@
 # default is nosdcard, S/W button enabled in resource
 DEVICE_PACKAGE_OVERLAYS := device/rockchip/rk31board/overlay
 PRODUCT_CHARACTERISTICS := tablet
+BLUETOOTH_USE_BPLUS := true
+BOARD_CODEC_RT5631 := true
+BOARD_BP_AUTO := true
 
 # Copy prebuilt apps
 PRODUCT_COPY_FILES += \
@@ -206,7 +209,31 @@ PRODUCT_PACKAGES += \
 # 3G
 PRODUCT_PACKAGES += \
     rild \
-    chat
+    chat \
+    Mms \
+    Stk
+
+PRODUCT_PROPERTY_OVERRIDES += \
+    keyguard.no_require_sim=true \
+    ro.com.android.dataroaming=true
+
+PRODUCT_PROPERTY_OVERRIDES += \
+                ril.function.dataonly=0
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath1=/system/lib/libreference-ril-mt6229.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath2=/system/lib/libreference-ril-mu509.so 
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath4=/system/lib/libreference-ril-mw100.so 
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath6=/system/lib/libreference-ril-sc6610.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath7=/system/lib/libreference-ril-m51.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath8=/system/lib/libreference-ril-mt6250.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath9=/system/lib/libreference-ril-c66a.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath10=/system/lib/libreference-ril-sew290.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath11=/system/lib/libreference-ril-u5501.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath12=/system/lib/libreference-ril-u7501.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath14=/system/lib/libreference-ril-a85xx.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath15=/system/lib/libreference-ril-e1230s.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild1.libpath=/system/lib/libreference-ril-sc6610-1.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild3.libpath=/system/lib/libril-rk29-dataonly.so
+    ADDITIONAL_DEFAULT_PROPERTIES += rild.libpath13=/system/lib/libreference-ril-aw706.so
 # End 3G
 
 # Bluetooth
